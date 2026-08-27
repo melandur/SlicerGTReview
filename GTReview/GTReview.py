@@ -1016,8 +1016,6 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     #: zooms, middle-drag and Shift+left-drag pan, and r resets the field of
     #: view, the centre and the slice offset together.
     SHORTCUT_KEYS = (
-        ("n / p", "next / previous case"),
-        ("j", "jump to the selected lesion"),
         ("1 / 2 / 3", "paint / erase / sphere"),
         ("a / s / d", "mask fainter / hide / stronger"),
         ("Del", "delete the selected lesion"),
@@ -1916,10 +1914,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         shift = qt.Qt.ShiftModifier
         none = qt.Qt.NoModifier
         bindings = (
-            ("n", qt.Qt.Key_N, none, "n", self.onNextCase),
-            ("p", qt.Qt.Key_P, none, "p", self.onPreviousCase),
             ("Ctrl+S", qt.Qt.Key_S, control, "", self.onSave),
-            ("j", qt.Qt.Key_J, none, "j", self.onJumpToLesion),
             ("a", qt.Qt.Key_A, none, "a", self.onMaskMoreTransparent),
             ("s", qt.Qt.Key_S, none, "s", self.onToggleMaskVisible),
             ("d", qt.Qt.Key_D, none, "d", self.onMaskMoreOpaque),

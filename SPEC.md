@@ -61,9 +61,9 @@ Saving writes `<case_dir>/<case_id>_reviewed_seg.nii.gz`.
 4. **Editing tools** — delete lesion, change a lesion's label, add segmentation by
    painting/erasing, threshold-based segmentation, undo, redo, reset-to-loaded.
 5. **Save** — one button, "Save & next case", at the bottom of the Editing section (Ctrl+S saves without moving on). Both are enabled only once every lesion in the (up-to-date) list is ticked *Done*; an empty list counts as done.
-6. **Keyboard shortcuts** — n / p next+prev case, Ctrl+S save, Del delete selected
-   lesion, Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, j jump to selected
-   lesion, 1 / 2 paint / erase, 3 sphere threshold, Esc stop editing,
+6. **Keyboard shortcuts** — Ctrl+S save, Del delete selected
+   lesion, Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo,
+   1 / 2 paint / erase, 3 sphere threshold, Esc stop editing,
    a / d mask 10% more transparent / opaque, s hide+show mask.
 7. **Editing is gated** — the brush, Delete and the threshold effects only work
    while a lesion is selected in the table, or while "New lesion → Start painting"

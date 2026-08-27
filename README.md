@@ -247,10 +247,7 @@ while a text field has focus, so typing in a line edit never triggers them.
 
 | Shortcut | Action |
 | --- | --- |
-| `n` | Next case |
-| `p` | Previous case |
 | `Ctrl+S` | Save the reviewed mask |
-| `j` | Jump all slice views to the selected lesion |
 | `1` / `2` | Paint / erase (needs a selected lesion or an active "New lesion") |
 | `3` | Sphere threshold: click a lesion's centre, drag to pull the sphere |
 | `Esc` | Stop editing / cancel "New lesion" |
