@@ -1,65 +1,126 @@
 #!/usr/bin/env bash
 #
 # Build an extension package that Slicer's Extensions Manager will accept
-# through "Install from file".
+# through "Install from file", for Linux, macOS or Windows.
 #
 # No Slicer build tree is needed.  GTReview is python-only, and the extensions
-# manager asks for very little: an archive with a single top-level directory,
-# holding an .s4ext description file anywhere inside it.  The name of that file
-# becomes the extension name, and the directory's contents become the installed
-# tree.  (Slicer/Base/QTCore/qSlicerExtensionsManagerModel.cxx --
-# installExtension() scans the archive for *.s4ext, extractExtensionArchive()
-# requires the single top-level directory.)
+# manager asks for very little: an archive with a single top-level directory
+# holding an .s4ext description file.  The name of that file becomes the
+# extension name, and the directory's contents become the installed tree.
+# (Slicer/Base/QTCore/qSlicerExtensionsManagerModel.cxx -- installExtension()
+# scans the archive for *.s4ext, extractExtensionArchive() requires the single
+# top-level directory.)
 #
-# The version-specific part is lib/Slicer-<major.minor>/qt-scripted-modules:
-# Slicer only looks there, so a package built for 5.10 is invisible to 5.12.
-# That directory name is read from the Slicer install passed in, which is why
-# this script wants one rather than guessing.
+# Two things make a package platform-specific:
+#
+#   * The module is installed under lib/Slicer-<major.minor>/qt-scripted-modules
+#     and Slicer looks nowhere else, so a package built for 5.10 is invisible to
+#     5.12.  That directory name is read from the Slicer install passed in.
+#
+#   * macOS wants one more level of nesting.  extractExtensionArchive copies
+#     from <archive>/Slicer.app/Contents/Extensions-<revision>/<name> there,
+#     against <archive>/ on Linux and Windows (the Slicer_OS_MAC_NAME branch,
+#     using Slicer_BUNDLE_LOCATION = "Slicer.app/Contents").  The revision in
+#     that path is the RUNNING Slicer's, so a macOS package is tied to one
+#     revision and not merely one minor version -- pass --revision to match the
+#     machine it is for.
 #
 # Usage:
-#   Packaging/make_package.sh [--slicer <slicer-install-dir>] [--output <dir>]
+#   Packaging/make_package.sh [--slicer <dir>] [--os linux|macosx|win]
+#                             [--revision <rev>] [--slicer-version <x.y>]
+#                             [--output <dir>]
 #
-#   --slicer   a Slicer installation, e.g. ~/Documents/Slicer-5.10.0-linux-amd64
-#              (default: $SLICER_HOME, else the newest ~/Documents/Slicer-*)
-#   --output   where to write the .tar.gz (default: the repository root)
+#   --slicer          a Slicer installation to read the layout from
+#   --os              target platform (default: detected from --slicer, else this host)
+#   --revision        target Slicer revision, e.g. 34045.  Cosmetic on Linux and
+#                     Windows, LOAD-BEARING on macOS (see above)
+#   --slicer-version  major.minor, e.g. 5.10, when building without a --slicer
+#   --output          where to write the archive (default: the repository root)
 #
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SLICER_DIR="${SLICER_HOME:-}"
 OUTPUT_DIR="$REPO"
+TARGET_OS=""
+REVISION=""
+SLICER_MINOR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --slicer) SLICER_DIR="$2"; shift 2 ;;
+        --os) TARGET_OS="$2"; shift 2 ;;
+        --revision) REVISION="$2"; shift 2 ;;
+        --slicer-version) SLICER_MINOR="$2"; shift 2 ;;
         --output) OUTPUT_DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 
+# ---------------------------------------------------------------------------
+# Where things live differs per platform, so find the installation first and
+# let it answer the questions rather than guessing from the host.
+# ---------------------------------------------------------------------------
 if [ -z "$SLICER_DIR" ]; then
-    SLICER_DIR="$(ls -d "$HOME"/Documents/Slicer-*-linux-amd64 2>/dev/null | sort -V | tail -1 || true)"
-fi
-if [ -z "$SLICER_DIR" ] || [ ! -x "$SLICER_DIR/Slicer" ]; then
-    echo "error: no Slicer installation found; pass --slicer <dir>" >&2
-    exit 1
+    SLICER_DIR="$(ls -d "$HOME"/Documents/Slicer-* "$HOME"/Slicer-* \
+                      /Applications/Slicer.app 2>/dev/null | sort -V | tail -1 || true)"
 fi
 
-# lib/Slicer-5.10 -> 5.10.  Everything installed has to sit under that name.
-LIB_DIR="$(ls -d "$SLICER_DIR"/lib/Slicer-* 2>/dev/null | head -1 || true)"
-if [ -z "$LIB_DIR" ]; then
-    echo "error: $SLICER_DIR has no lib/Slicer-<major.minor> directory" >&2
-    exit 1
-fi
-SLICER_MINOR="$(basename "$LIB_DIR" | sed 's/^Slicer-//')"
+detect_os() {
+    local dir="$1"
+    if [ -x "$dir/Contents/MacOS/Slicer" ] || [ -d "$dir/Contents/MacOS" ]; then
+        echo macosx
+    elif [ -f "$dir/Slicer.exe" ]; then
+        echo win
+    elif [ -x "$dir/Slicer" ]; then
+        echo linux
+    fi
+}
 
-# The revision only names the archive -- the install path is chosen by whichever
-# Slicer opens it -- but matching Slicer's own naming makes the file self-
-# describing when several are lying around.
-REVISION="$(ls -d "$SLICER_DIR"/slicer.org/Extensions-* 2>/dev/null | head -1 |
-            sed 's/.*Extensions-//' || true)"
-[ -n "$REVISION" ] || REVISION="rev"
+if [ -n "$SLICER_DIR" ] && [ -d "$SLICER_DIR" ]; then
+    [ -n "$TARGET_OS" ] || TARGET_OS="$(detect_os "$SLICER_DIR")"
+fi
+if [ -z "$TARGET_OS" ]; then
+    case "$(uname -s)" in
+        Darwin) TARGET_OS=macosx ;;
+        MINGW*|MSYS*|CYGWIN*) TARGET_OS=win ;;
+        *) TARGET_OS=linux ;;
+    esac
+fi
+case "$TARGET_OS" in
+    linux|macosx|win) ;;
+    mac|osx|darwin) TARGET_OS=macosx ;;
+    windows) TARGET_OS=win ;;
+    *) echo "error: --os must be linux, macosx or win (got '$TARGET_OS')" >&2; exit 2 ;;
+esac
+
+# On macOS the installation IS the bundle, so lib/ sits inside Contents/.
+INSTALL_PREFIX="$SLICER_DIR"
+[ "$TARGET_OS" = macosx ] && [ -d "$SLICER_DIR/Contents" ] && INSTALL_PREFIX="$SLICER_DIR/Contents"
+
+if [ -z "$SLICER_MINOR" ]; then
+    LIB_DIR="$(ls -d "$INSTALL_PREFIX"/lib/Slicer-* 2>/dev/null | head -1 || true)"
+    if [ -z "$LIB_DIR" ]; then
+        echo "error: could not find lib/Slicer-<major.minor> under $INSTALL_PREFIX." >&2
+        echo "       pass --slicer <installation> or --slicer-version <x.y>" >&2
+        exit 1
+    fi
+    SLICER_MINOR="$(basename "$LIB_DIR" | sed 's/^Slicer-//')"
+fi
+
+if [ -z "$REVISION" ]; then
+    REVISION="$(ls -d "$INSTALL_PREFIX"/slicer.org/Extensions-* "$INSTALL_PREFIX"/Extensions-* \
+                    2>/dev/null | head -1 | sed 's/.*Extensions-//' || true)"
+fi
+if [ -z "$REVISION" ]; then
+    if [ "$TARGET_OS" = macosx ]; then
+        echo "error: macOS packages embed the target Slicer's revision in their" >&2
+        echo "       directory layout and it cannot be guessed; pass --revision" >&2
+        exit 1
+    fi
+    REVISION="rev"
+fi
 
 VERSION="$(cd "$REPO" && git describe --tags --always --dirty 2>/dev/null || echo "untagged")"
 
@@ -111,15 +172,20 @@ done < <(cd "$MODULE_DIR" && find . -name '*.py' -not -path './__pycache__/*' \
 RESOURCES=(Resources/Icons/"$EXTENSION_NAME".png)
 
 # ---------------------------------------------------------------------------
-# Assemble.  The layout mirrors an installed extension exactly, which is what
-# extractExtensionArchive copies into place.
+# Assemble.  INNER is what the manager copies into place; on macOS it is buried
+# under the bundle path the mac branch of extractExtensionArchive looks for.
 # ---------------------------------------------------------------------------
-ARCHIVE_BASE="${REVISION}-linux-amd64-${EXTENSION_NAME}-${VERSION}"
+ARCHIVE_BASE="${REVISION}-${TARGET_OS}-amd64-${EXTENSION_NAME}-${VERSION}"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/$ARCHIVE_BASE"
-SCRIPTED="$ROOT/lib/Slicer-$SLICER_MINOR/qt-scripted-modules"
-SHARE="$ROOT/share/Slicer-$SLICER_MINOR"
+if [ "$TARGET_OS" = macosx ]; then
+    INNER="$ROOT/Slicer.app/Contents/Extensions-$REVISION/$EXTENSION_NAME"
+else
+    INNER="$ROOT"
+fi
+SCRIPTED="$INNER/lib/Slicer-$SLICER_MINOR/qt-scripted-modules"
+SHARE="$INNER/share/Slicer-$SLICER_MINOR"
 mkdir -p "$SCRIPTED" "$SHARE"
 
 for script in "${SCRIPTS[@]}"; do
@@ -158,8 +224,13 @@ tar -czf "$ARCHIVE" -C "$STAGE" "$ARCHIVE_BASE"
 echo "built $ARCHIVE"
 echo
 echo "  extension   $EXTENSION_NAME $VERSION"
-echo "  for Slicer  $SLICER_MINOR  (a package for one minor version is invisible to another)"
+echo "  target      $TARGET_OS, Slicer $SLICER_MINOR, revision $REVISION"
 echo "  files       ${#SCRIPTS[@]} scripts + ${#RESOURCES[@]} resource(s)"
+if [ "$TARGET_OS" = macosx ]; then
+    echo "  note        macOS packages are tied to revision $REVISION, not just to $SLICER_MINOR"
+else
+    echo "  note        a package for Slicer $SLICER_MINOR is invisible to any other minor version"
+fi
 echo
 echo "Install it: Slicer -> View -> Extensions Manager -> Install from file,"
 echo "pick this archive, then restart.  GT Review appears under Segmentation."

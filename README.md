@@ -76,6 +76,16 @@ testable under plain `PythonSlicer`.
 
 ## Installation
 
+The commands below use two variables so they can be pasted anywhere. Set them
+once per shell:
+
+```bash
+export GTREVIEW=/path/to/this/repository      # the directory holding this README
+export SLICER=/path/to/Slicer-5.10.0-linux-amd64
+# macOS: SLICER=/Applications/Slicer.app/Contents  (the launcher is MacOS/Slicer)
+# Windows: use Git Bash or WSL, SLICER=/c/Users/you/AppData/Local/NA-MIC/Slicer\ 5.10.0
+```
+
 ### Developer path (no build — recommended for this repository)
 
 You cannot build a Slicer extension against a downloaded Slicer *binary*: the
@@ -88,11 +98,11 @@ scripted modules run straight from the source tree.
 3. Add the directory that **directly contains `GTReview.py`**:
 
    ```
-   /home/melandur/code/gt_tools_slicer/GTReview
+   $GTREVIEW/GTReview
    ```
 
    Not the repository root. Module discovery is one level deep, not recursive —
-   pointing at `/home/melandur/code/gt_tools_slicer` registers nothing and makes
+   pointing at `$GTREVIEW` registers nothing and makes
    `GTReviewLib` unimportable.
 4. Restart Slicer. `GTReview` now appears under **Segmentation** in the module
    list.
@@ -100,8 +110,8 @@ scripted modules run straight from the source tree.
 Equivalent one-shot invocation, no settings change:
 
 ```bash
-/home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer \
-    --additional-module-path /home/melandur/code/gt_tools_slicer/GTReview
+$SLICER/Slicer \
+    --additional-module-path $GTREVIEW/GTReview
 ```
 
 Notes:
@@ -126,11 +136,22 @@ Notes:
 through **Install from file**, straight from the source tree:
 
 ```bash
-Packaging/make_package.sh --slicer /home/melandur/Documents/Slicer-5.10.0-linux-amd64
+Packaging/make_package.sh --slicer $SLICER                 # this machine
+Packaging/make_package.sh --slicer $SLICER --os win        # for a Windows user
+Packaging/make_package.sh --slicer $SLICER --os macosx --revision 34045
 ```
 
 Then in Slicer: **View → Extensions Manager → Install from file**, pick the
 `.tar.gz`, restart. *GT Review* appears under **Segmentation**.
+
+`--os` defaults to whatever the `--slicer` installation is, so the plain form
+builds for the machine you are on. The layout differs per platform: macOS
+buries the tree under `Slicer.app/Contents/Extensions-<revision>/<name>/`,
+which is where `extractExtensionArchive` copies from there, while Linux and
+Windows take it from the top level. That path embeds the **revision**, so a
+macOS package is tied to one Slicer build rather than merely one minor version
+— pass `--revision` matching the machine it is for, and the script refuses to
+guess.
 
 This works because a python-only extension needs no compilation: the manager
 looks for a single top-level directory holding an `.s4ext` file (whose *name*
@@ -157,7 +178,7 @@ To build a package yourself you need a Slicer **build tree** matching your
 runtime, then:
 
 ```bash
-cmake -DSlicer_DIR:PATH=/path/to/Slicer-build -S /home/melandur/code/gt_tools_slicer -B /path/to/GTReview-build
+cmake -DSlicer_DIR:PATH=/path/to/Slicer-build -S $GTREVIEW -B /path/to/GTReview-build
 cmake --build /path/to/GTReview-build
 cmake --build /path/to/GTReview-build --target package
 ```
@@ -273,8 +294,8 @@ exist solely inside a running Slicer, so anything `discover` picks up must stay
 clear of them:
 
 ```bash
-/home/melandur/Documents/Slicer-5.10.0-linux-amd64/bin/PythonSlicer \
-    -m unittest discover -s /home/melandur/code/gt_tools_slicer/Testing -v
+$SLICER/bin/PythonSlicer \
+    -m unittest discover -s $GTREVIEW/Testing -v
 ```
 
 (`pytest` is not installed in `PythonSlicer` by default; if you prefer it,
@@ -285,8 +306,8 @@ find lesions, delete one, save a `_reviewed_seg.nii.gz` to a temp directory,
 re-read it:
 
 ```bash
-/home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer --no-main-window \
-    --python-script /home/melandur/code/gt_tools_slicer/Testing/smoke_headless.py
+$SLICER/Slicer --no-main-window \
+    --python-script $GTREVIEW/Testing/smoke_headless.py
 ```
 
 The integration test drives the module itself: it builds a synthetic case in a
@@ -297,9 +318,9 @@ and *Delete review* behave. It needs the module on the path, and is named
 without a `test_` prefix so the `discover` run above leaves it alone:
 
 ```bash
-/home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer --no-splash \
-    --additional-module-path /home/melandur/code/gt_tools_slicer/GTReview \
-    --python-script /home/melandur/code/gt_tools_slicer/Testing/integration_gtreview.py
+$SLICER/Slicer --no-splash \
+    --additional-module-path $GTREVIEW/GTReview \
+    --python-script $GTREVIEW/Testing/integration_gtreview.py
 ```
 
 The in-application self test (`GTReviewTest`) is reachable from the module's

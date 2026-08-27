@@ -5,16 +5,16 @@ Review and correct ground-truth segmentation masks for brain-METS NIfTI datasets
 lesion by lesion, without ever touching the original files.
 
 ## Environment (verified facts — do not re-derive)
-- Slicer 5.10.0 at `/home/melandur/Documents/Slicer-5.10.0-linux-amd64`
+- Slicer 5.10.0 at `$SLICER`
   - launcher `.../Slicer`, python `.../bin/PythonSlicer`
   - built-in scripted modules (READ THESE FOR REAL API USAGE):
-    `/home/melandur/Documents/Slicer-5.10.0-linux-amd64/lib/Slicer-5.10/qt-scripted-modules/`
+    `$SLICER/lib/Slicer-5.10/qt-scripted-modules/`
   - Python 3.12.10, numpy, scipy 1.13.1, SimpleITK 2.5.2 all available in PythonSlicer.
-- Project root: `/home/melandur/code/gt_tool_slicer` (git repo, currently empty except this SPEC).
+- Project root: `$GTREVIEW` (git repo, currently empty except this SPEC).
 
 ## Data layout (verified)
 Root example:
-`/home/melandur/Neosoma Inc. Dropbox/Neosoma Inc. R&D AI/01_Annotation/METS/04_Groundtruthed/01_Yale/batch_01`
+`<annotation-root>/METS/04_Groundtruthed/01_Yale/batch_01`
 
 ```
 <batch_dir>/
