@@ -63,11 +63,11 @@ scripted modules run straight from the source tree.
 3. Add the directory that **directly contains `GTReview.py`**:
 
    ```
-   /home/melandur/code/gt_tool_slicer/GTReview
+   /home/melandur/code/gt_tools_slicer/GTReview
    ```
 
    Not the repository root. Module discovery is one level deep, not recursive —
-   pointing at `/home/melandur/code/gt_tool_slicer` registers nothing and makes
+   pointing at `/home/melandur/code/gt_tools_slicer` registers nothing and makes
    `GTReviewLib` unimportable.
 4. Restart Slicer. `GTReview` now appears under **Segmentation** in the module
    list.
@@ -76,7 +76,7 @@ Equivalent one-shot invocation, no settings change:
 
 ```bash
 /home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer \
-    --additional-module-path /home/melandur/code/gt_tool_slicer/GTReview
+    --additional-module-path /home/melandur/code/gt_tools_slicer/GTReview
 ```
 
 Notes:
@@ -106,7 +106,7 @@ To build a package yourself you need a Slicer **build tree** matching your
 runtime, then:
 
 ```bash
-cmake -DSlicer_DIR:PATH=/path/to/Slicer-build -S /home/melandur/code/gt_tool_slicer -B /path/to/GTReview-build
+cmake -DSlicer_DIR:PATH=/path/to/Slicer-build -S /home/melandur/code/gt_tools_slicer -B /path/to/GTReview-build
 cmake --build /path/to/GTReview-build
 cmake --build /path/to/GTReview-build --target package
 ```
@@ -224,7 +224,7 @@ The pure-logic tests are plain `unittest` and need no Slicer application:
 
 ```bash
 /home/melandur/Documents/Slicer-5.10.0-linux-amd64/bin/PythonSlicer \
-    -m unittest discover -s /home/melandur/code/gt_tool_slicer/Testing -v
+    -m unittest discover -s /home/melandur/code/gt_tools_slicer/Testing -v
 ```
 
 (`pytest` is not installed in `PythonSlicer` by default; if you prefer it,
@@ -236,7 +236,7 @@ re-read it:
 
 ```bash
 /home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer --no-main-window \
-    --python-script /home/melandur/code/gt_tool_slicer/Testing/smoke_headless.py
+    --python-script /home/melandur/code/gt_tools_slicer/Testing/smoke_headless.py
 ```
 
 The in-application self test (`GTReviewTest`) is reachable from the module's
@@ -286,7 +286,7 @@ short version:
      "category": "Segmentation",
      "scm_revision": "main",
      "scm_type": "git",
-     "scm_url": "https://github.com/Neosoma/SlicerGTReview",
+     "scm_url": "https://github.com/melandur/SlicerGTReview",
      "tier": 1
    }
    ```

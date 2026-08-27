@@ -17,13 +17,12 @@ project(${EXTENSION_NAME})
 # (via the .s4ext description file). The Extensions Index catalog entry
 # (GTReview.json) has "additionalProperties": false and cannot carry them.
 #
-# TODO: replace the <org> placeholder once the repository is published.
-set(EXTENSION_HOMEPAGE "https://github.com/Neosoma/SlicerGTReview")
+set(EXTENSION_HOMEPAGE "https://github.com/melandur/SlicerGTReview")
 set(EXTENSION_CATEGORY "Segmentation")
 set(EXTENSION_CONTRIBUTORS "Neosoma Inc. (https://www.neosomainc.com)")
 set(EXTENSION_DESCRIPTION "Review and correct ground-truth segmentation masks for brain-METS NIfTI datasets, lesion by lesion, without ever modifying the original files.")
-set(EXTENSION_ICONURL "https://raw.githubusercontent.com/Neosoma/SlicerGTReview/main/GTReview/Resources/Icons/GTReview.png")
-set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/Neosoma/SlicerGTReview/main/Screenshots/1.png")
+set(EXTENSION_ICONURL "https://raw.githubusercontent.com/melandur/SlicerGTReview/main/GTReview/Resources/Icons/GTReview.png")
+set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/melandur/SlicerGTReview/main/Screenshots/1.png")
 set(EXTENSION_STATUS "Beta")
 set(EXTENSION_DEPENDS "NA")            # space separated list of extension names, or "NA"
 set(EXTENSION_BUILD_SUBDIRECTORY ".")  # python-only: no superbuild, no inner-build
