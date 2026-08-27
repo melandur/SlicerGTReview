@@ -943,6 +943,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.deleteReviewButton = None
         self._panelNarrowed = False
         self._effectOptionsBox = None
+        self.shortcutsFrame = None
         # mask fingerprints taken at the start of each paint stroke, so one
         # Undo press can step back over the whole stroke
         self._strokeStarts = []
@@ -996,6 +997,9 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._buildLesionSection()
         self._buildEditingSection()
         self.layout.addStretch(1)
+        # after the stretch, so it is pinned to the bottom of the panel rather
+        # than following the sections up
+        self._buildShortcutsFooter()
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
@@ -1003,6 +1007,77 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._populateDatasetHistory()
         self._updateCaseControls()
         self._updateEditingControls()
+
+    # -- shortcuts ----------------------------------------------------------- #
+    #: rows of the pinned footer.  The view bindings are Slicer's own, not
+    #: ours, and were checked against a running 5.10 slice view rather than
+    #: taken from the documentation: wheel moves through slices, right-drag
+    #: zooms, middle-drag and Shift+left-drag pan, and r resets the field of
+    #: view, the centre and the slice offset together.
+    SHORTCUT_KEYS = (
+        ("n / p", "next / previous case"),
+        ("j", "jump to the selected lesion"),
+        ("1 / 2 / 3", "paint / erase / sphere"),
+        ("a / s / d", "mask fainter / hide / stronger"),
+        ("Del", "delete the selected lesion"),
+        ("Ctrl+Z / Ctrl+Y", "undo / redo"),
+        ("Ctrl+S", "save"),
+        ("Esc", "stop editing"),
+    )
+    SHORTCUT_VIEWS = (
+        ("wheel", "slice through the volume"),
+        ("right-drag", "zoom"),
+        ("middle-drag", "move the image"),
+        ("Shift+drag", "move the image too"),
+        ("Ctrl+wheel", "zoom too"),
+        ("r", "reset zoom and centre"),
+    )
+
+    def _buildShortcutsFooter(self):
+        """A pinned cheat-sheet at the foot of the panel.
+
+        Deliberately not a collapsible section: the point is that it is always
+        there.  It sits below the stretch, so it stays at the bottom while the
+        sections above grow and shrink.
+        """
+        frame = qt.QFrame()
+        frame.setFrameShape(qt.QFrame.StyledPanel)
+        layout = self._tighten(qt.QVBoxLayout(frame), spacing=2)
+
+        heading = qt.QLabel("<b>Shortcuts</b>")
+        layout.addWidget(heading)
+
+        def column(rows, title):
+            cells = "".join(
+                "<tr><td style='padding-right:8px; white-space:nowrap;'><b>{}</b></td>"
+                "<td><font color='gray'>{}</font></td></tr>".format(key, what)
+                for key, what in rows
+            )
+            label = qt.QLabel(
+                "<table cellspacing='0' cellpadding='0'>"
+                "<tr><td colspan='2'><font color='gray'><i>{}</i></font></td></tr>"
+                "{}</table>".format(title, cells)
+            )
+            label.textFormat = qt.Qt.RichText
+            label.textInteractionFlags = qt.Qt.TextSelectableByMouse
+            return label
+
+        columns = qt.QHBoxLayout()
+        columns.setSpacing(12)
+        # the columns hold different numbers of rows; without this the shorter
+        # one is centred against the taller and the two headings do not line up
+        for widget in (column(self.SHORTCUT_KEYS, "review"),
+                       column(self.SHORTCUT_VIEWS, "views (Slicer's own)")):
+            columns.addWidget(widget, 1, qt.Qt.AlignTop)
+        columns.addStretch(0)
+        layout.addLayout(columns)
+
+        font = heading.font
+        font.setPointSizeF(max(6.0, font.pointSizeF() - 1.0))
+        frame.setFont(font)
+
+        self.shortcutsFrame = frame
+        self.layout.addWidget(frame)
 
     # -- dataset ------------------------------------------------------------- #
     def _buildDatasetSection(self):
