@@ -120,6 +120,32 @@ Notes:
   After editing `GTReviewLib/*.py`, restart Slicer (the module does not
   override `onReload`, so *Reload* will not pick those edits up).
 
+### Install from a local package (no build tree)
+
+`Packaging/make_package.sh` builds an archive the Extensions Manager accepts
+through **Install from file**, straight from the source tree:
+
+```bash
+Packaging/make_package.sh --slicer /home/melandur/Documents/Slicer-5.10.0-linux-amd64
+```
+
+Then in Slicer: **View → Extensions Manager → Install from file**, pick the
+`.tar.gz`, restart. *GT Review* appears under **Segmentation**.
+
+This works because a python-only extension needs no compilation: the manager
+looks for a single top-level directory holding an `.s4ext` file (whose *name*
+becomes the extension name) and copies the rest into place. The script writes
+that description from the `EXTENSION_*` variables in the top-level
+`CMakeLists.txt`, so it cannot drift from a real CPack build, and it refuses to
+package if `MODULE_PYTHON_SCRIPTS` and the `.py` files on disk disagree in
+either direction — the failure the module `CMakeLists.txt` warns about, where an
+unlisted file keeps working from source and breaks only once installed.
+
+The archive is tied to one Slicer **minor** version, because the module is
+installed under `lib/Slicer-<major.minor>/qt-scripted-modules` and Slicer looks
+nowhere else. Build one per target version; the directory name is read from the
+`--slicer` installation rather than guessed.
+
 ### Extension path (built / installed package)
 
 For end users the extension is installed like any other:
