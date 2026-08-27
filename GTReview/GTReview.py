@@ -18,6 +18,7 @@ Design invariants (see SPEC.md, they are binding):
 
 import functools
 import logging
+import math
 import os
 import sys
 import time
@@ -53,11 +54,27 @@ except ImportError:  # pragma: no cover - very old Slicer
 # --------------------------------------------------------------------------- #
 # defensive import shim: works from the source tree and from an install tree
 # --------------------------------------------------------------------------- #
+# The directory holding THIS file goes to the front, not merely onto the path:
+# a Slicer that also has GTReview installed as an extension already has that
+# copy's directory on sys.path, and "GTReviewLib" would resolve there while
+# GTReview.py itself is being loaded from the source tree -- two halves of two
+# versions, which fails outright the moment one of them grows a new module.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-for _candidate in (_THIS_DIR, os.path.dirname(_THIS_DIR)):
-    if os.path.isdir(os.path.join(_candidate, "GTReviewLib")) and _candidate not in sys.path:
-        sys.path.insert(0, _candidate)
+for _candidate in (os.path.dirname(_THIS_DIR), _THIS_DIR):
+    if not os.path.isdir(os.path.join(_candidate, "GTReviewLib")):
+        continue
+    while _candidate in sys.path:
+        sys.path.remove(_candidate)
+    sys.path.insert(0, _candidate)
 del _candidate
+# a GTReviewLib already imported from somewhere else must not stay cached
+_name = _file = None
+for _name in [_n for _n in list(sys.modules)
+              if _n == "GTReviewLib" or _n.startswith("GTReviewLib.")]:
+    _file = getattr(sys.modules[_name], "__file__", "") or ""
+    if not os.path.abspath(_file).startswith(_THIS_DIR + os.sep):
+        del sys.modules[_name]
+del _name, _file
 
 try:
     from GTReviewLib import dataset, lesions, maskio
@@ -891,6 +908,20 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     MASK_OPACITY_STEP = 0.1
     #: the lesion table grows with the list, then scrolls
     LESION_TABLE_MAX_ROWS = 10
+    #: lesion table columns.  "Label" is gone: every lesion in the list already
+    #: carries its colour in the views, and the column never varied enough to
+    #: earn the width.
+    LESION_COLUMN_NUMBER = 0
+    LESION_COLUMN_VOXELS = 1
+    LESION_COLUMN_VOLUME = 2
+    LESION_COLUMN_DONE = 3
+    #: last column: a per-row delete button, not data
+    LESION_DELETE_COLUMN = 4
+    #: "Paint over" sentinels; any other item data is a label value
+    PAINT_OVER_ALL = -1
+    PAINT_OVER_BACKGROUND = -2
+    #: "Active label" sentinel; 0 is the background value in the saved NIfTI
+    ACTIVE_LABEL_BACKGROUND = 0
     #: how many times a jumped-to lesion blinks, and how fast
     FLASH_BLINKS = 3
     FLASH_INTERVAL_MS = 170
@@ -902,6 +933,18 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.editor = None
         self.segmentEditorNode = None
         self.effectFactorySingleton = None
+        # applyViewLayers can run before the Display section is built
+        self.windowLevelWidget = None
+        self.lesionControls = None
+        self.alignSlicesCheckBox = None
+        self.activeLabelComboBox = None
+        self.paintOverComboBox = None
+        self.newLesionButton = None
+        # mask fingerprints taken at the start of each paint stroke, so one
+        # Undo press can step back over the whole stroke
+        self._strokeStarts = []
+        self._redoTargets = []
+        self._strokeObservers = []
 
         self.cases = []
         self.filteredCases = []
@@ -1073,11 +1116,44 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.opacitySlider.connect("valueChanged(double)", self.onOpacityChanged)
         form.addRow("Blend:", self.opacitySlider)
 
+        # Window/level of the Image layer.  Slicer's own widget is used rather
+        # than a pair of sliders: it carries the auto/manual modes and the
+        # modality presets, and it writes straight to the volume display node,
+        # so nothing here has to mirror that state.
+        self.windowLevelWidget = slicer.qMRMLWindowLevelWidget()
+        self.windowLevelWidget.toolTip = (
+            "Brightness / contrast of the image above.\n"
+            "Auto follows the volume, Manual lets you drag the range.\n"
+            "Purely a display setting -- it never touches the voxels or the mask."
+        )
+        # the widget carries its own "Window/Level:" caption, which would sit
+        # next to the form's own label and say the same thing twice
+        innerLabel = self.windowLevelWidget.findChild(qt.QLabel, "label")
+        if innerLabel is not None:
+            innerLabel.setVisible(False)
+        form.addRow("Contrast:", self.windowLevelWidget)
+
         self.layoutComboBox = qt.QComboBox()
         for title, attributeName, fallback in LAYOUT_CHOICES:
             self.layoutComboBox.addItem(title, layoutId(attributeName, fallback))
         self.layoutComboBox.connect("activated(int)", self.onLayoutChanged)
         form.addRow("Layout:", self.layoutComboBox)
+
+        # Ticked by default: in this data the mask is a median 8 degrees off the
+        # anatomical axes, so the default anatomical slice planes cut the voxel
+        # grid diagonally and a stroke drawn as a clean disc is committed as a
+        # stair-stepped one.  Editing wants the acquisition plane.  Untick to
+        # get true axial / coronal / sagittal back for judging anatomy.
+        self.alignSlicesCheckBox = qt.QCheckBox("align to the image grid")
+        self.alignSlicesCheckBox.checked = True
+        self.alignSlicesCheckBox.toolTip = (
+            "Rotate the slice views onto the mask's own voxel axes, so painting "
+            "lands on whole voxels instead of stair-stepping.\n"
+            "Untick for true axial / coronal / sagittal.  Display only -- it "
+            "never changes a voxel."
+        )
+        self.alignSlicesCheckBox.connect("toggled(bool)", self.onAlignSlicesChanged)
+        form.addRow("Slices:", self.alignSlicesCheckBox)
 
         maskRow = qt.QHBoxLayout()
         maskRow.setSpacing(6)
@@ -1113,7 +1189,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(section)
         box = self._tighten(qt.QVBoxLayout(section), spacing=3)
 
-        controls = qt.QHBoxLayout()
+        # The row below (min voxels / refresh / auto / flash / staleness) is
+        # built but never shown: the defaults it carries -- auto-refresh on,
+        # flash on, no size filter -- are the only ones the review workflow
+        # uses, and the controls were more clutter than choice.  The widgets
+        # stay alive because the refresh and flash logic reads them.
+        self.lesionControls = qt.QWidget()
+        controls = qt.QHBoxLayout(self.lesionControls)
+        controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(4)
         controls.addWidget(qt.QLabel("Min voxels:"))
         self.minVoxelsSpinBox = qt.QSpinBox()
@@ -1146,12 +1229,33 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.staleLabel = qt.QLabel("")
         controls.addWidget(self.staleLabel)
         controls.addStretch(1)
-        box.addLayout(controls)
+        self.lesionControls.setVisible(False)
+        box.addWidget(self.lesionControls)
+
+        # New-lesion mode has existed in the logic all along with nothing to
+        # start it: the button and label combo it reads were never built, so
+        # onNewLesionToggled raised AttributeError on the missing combo.  The
+        # label now comes from the Active label box instead.
+        newRow = qt.QHBoxLayout()
+        newRow.setSpacing(4)
+        self.newLesionButton = qt.QPushButton("New lesion")
+        self.newLesionButton.setIcon(self._historyIcon("plus"))
+        self.newLesionButton.setIconSize(qt.QSize(18, 18))
+        self.newLesionButton.setCheckable(True)
+        self.newLesionButton.toolTip = (
+            "Start a new lesion: paint anywhere the mask is still empty and the "
+            "stroke becomes its own row once the list refreshes.\n"
+            "It is painted with the Active label chosen below.  Esc cancels."
+        )
+        self.newLesionButton.connect("toggled(bool)", self.onNewLesionToggled)
+        newRow.addWidget(self.newLesionButton)
+        newRow.addStretch(1)
+        box.addLayout(newRow)
 
         self.lesionTable = qt.QTableWidget()
         self.lesionTable.setColumnCount(5)
         self.lesionTable.setHorizontalHeaderLabels(
-            ["#", "Label", "Voxels", "Volume (mm3)", "Done"]
+            ["#", "Voxels", "Volume (mm3)", "Done", ""]
         )
         self.lesionTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.lesionTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
@@ -1161,9 +1265,18 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.lesionTable.verticalHeader().setDefaultSectionSize(20)
         self.lesionTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         try:
-            self.lesionTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
+            header = self.lesionTable.horizontalHeader()
+            header.setSectionResizeMode(qt.QHeaderView.Stretch)
+            # the delete column holds a button, not text: keep it button-wide
+            header.setSectionResizeMode(
+                self.LESION_DELETE_COLUMN, qt.QHeaderView.ResizeToContents
+            )
+            # sorting by a column of widgets would shuffle the rows by nothing
+            header.connect(
+                "sortIndicatorChanged(int,Qt::SortOrder)", self.onLesionSortChanged
+            )
         except Exception:  # noqa: BLE001 - older Qt binding
-            logging.debug("GTReview: header resize mode unavailable", exc_info=True)
+            logging.debug("GTReview: header setup unavailable", exc_info=True)
         self.lesionTable.toolTip = (
             "One row per connected component of the mask.\n"
             "Select a row to act on that lesion; press j to jump the slice "
@@ -1189,27 +1302,36 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         # A compact history toolbar at the top (Undo / Redo / Reset as icons),
         # then the brush and the segment list.  Lesion actions live on the
-        # keyboard (Del delete, f flip) so the panel stays uncluttered.
-        style = slicer.app.style()
+        # keyboard (Del deletes a lesion) so the panel stays uncluttered.
         historyRow = qt.QHBoxLayout()
         historyRow.setSpacing(4)
 
-        def iconButton(standardPixmap, tooltip, slot):
-            button = qt.QToolButton()
-            button.setIcon(style.standardIcon(standardPixmap))
-            button.setIconSize(qt.QSize(20, 20))
-            button.setAutoRaise(True)
+        def iconButton(kind, text, tooltip, slot):
+            """One drawn glyph per action, with the label spelled out.
+
+            Slicer ships its undo and redo in one style and its restore icon in
+            another, and the QStyle arrows before those read as back/forward
+            navigation; three buttons in three styles look unrelated.  Drawing
+            them keeps one stroke weight and one colour across the row.
+
+            A framed QPushButton rather than a flat tool button: these sit in a
+            panel of QPushButtons ("Reset field of view", "Save & next case")
+            and a borderless row read as decoration next to them.
+            """
+            button = qt.QPushButton(text)
+            button.setIcon(self._historyIcon(kind))
+            button.setIconSize(qt.QSize(18, 18))
             button.toolTip = tooltip
             button.connect("clicked()", slot)
             historyRow.addWidget(button)
             return button
 
         self.undoButton = iconButton(
-            qt.QStyle.SP_ArrowBack, "Undo the last edit (Ctrl+Z)", self.onUndo)
+            "undo", "Undo", "Undo the last edit (Ctrl+Z)", self.onUndo)
         self.redoButton = iconButton(
-            qt.QStyle.SP_ArrowForward, "Redo (Ctrl+Y or Ctrl+Shift+Z)", self.onRedo)
+            "redo", "Redo", "Redo (Ctrl+Y or Ctrl+Shift+Z)", self.onRedo)
         self.resetButton = iconButton(
-            qt.QStyle.SP_BrowserReload,
+            "reset", "Reset",
             "Reset all: reload the mask from disk, discarding all edits.",
             self.onReset)
         historyRow.addStretch(1)
@@ -1234,18 +1356,56 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             box.addWidget(qt.QLabel("Segment editor unavailable."))
             return
 
-        editorLabel = qt.QLabel(
-            "<b>Brush</b> "
-            "<font color='gray' size='-1'>&mdash; 1 paint, 2 erase, 3 sphere "
-            "threshold (click the centre, drag to pull the sphere), Esc stop.  "
-            "Unlocked only while a lesion is selected.  Click <b>1</b> or "
-            "<b>2</b> in the list below to choose which label you paint.</font>"
+        # ITK-SNAP's two questions, in its words: which label goes down, and
+        # what may be painted over.  The second one is Slicer's masking
+        # section, which this module hides -- driving it from one combo box
+        # keeps the setting that matters without the other six.
+        labelForm = self._tighten(qt.QFormLayout())
+
+        self.activeLabelComboBox = qt.QComboBox()
+        self.activeLabelComboBox.toolTip = (
+            "The label the brush lays down.  The same choice as the segment "
+            "list on the right; the two follow each other."
         )
-        editorLabel.wordWrap = True
-        box.addWidget(editorLabel)
+        for value in sorted(LABEL_NAMES):
+            self.activeLabelComboBox.addItem(
+                self._labelIcon(value), nameForLabelValue(value), int(value)
+            )
+        # ITK-SNAP's "clear label": painting background is erasing, so this
+        # entry is the Erase tool under the name the reviewer is looking for
+        self.activeLabelComboBox.addItem(
+            self._labelIcon(self.ACTIVE_LABEL_BACKGROUND),
+            "Background (erase)",
+            self.ACTIVE_LABEL_BACKGROUND,
+        )
+        self.activeLabelComboBox.connect("activated(int)", self.onActiveLabelChanged)
+        labelForm.addRow("Active label:", self.activeLabelComboBox)
+
+        self.paintOverComboBox = qt.QComboBox()
+        self.paintOverComboBox.toolTip = (
+            "Which voxels the brush is allowed to change.\n"
+            "All labels: overwrite anything.\n"
+            "Background only: never touch a voxel that already has a label.\n"
+            "A single label: only that label may be painted over."
+        )
+        self.paintOverComboBox.addItem("All labels", self.PAINT_OVER_ALL)
+        self.paintOverComboBox.addItem("Background only", self.PAINT_OVER_BACKGROUND)
+        for value in sorted(LABEL_NAMES):
+            self.paintOverComboBox.addItem(
+                self._labelIcon(value),
+                "Only {}".format(nameForLabelValue(value)),
+                int(value),
+            )
+        self.paintOverComboBox.connect("activated(int)", self.onPaintOverChanged)
+        labelForm.addRow("Paint over:", self.paintOverComboBox)
+        box.addLayout(labelForm)
 
         self.editor = segmentationWidgets.qMRMLSegmentEditorWidget()
-        self.editor.setMaximumNumberOfUndoStates(20)
+        # Painting is immediate (see _applyImmediatePaint), and Slicer saves an
+        # undo state per brush stamp rather than per stroke, so one drag can eat
+        # a dozen states.  20 would leave no history after a couple of strokes;
+        # each state is a labelmap copy, so this is not free either.
+        self.editor.setMaximumNumberOfUndoStates(60)
         # setUndoEnabled(True) CLEARS the undo history every time it is called
         # (verified on 5.10), so it runs exactly once, here, before any edit.
         # Its read-back getter only reports widget visibility, never rely on it.
@@ -1271,15 +1431,24 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.editor.setEffectButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
         self.editor.setEffectColumnCount(3)
         box.addWidget(self.editor)
-        for name in ("UndoRedoGroupBox", "MaskingGroupBox"):
+        # EffectHelpBrowser is the "Paint with a round brush... Show details."
+        # line above every effect's options: prose about a tool the reviewer has
+        # already chosen, re-read on every switch.
+        for name in ("UndoRedoGroupBox", "MaskingGroupBox", "EffectHelpBrowser"):
             child = self.editor.findChild(qt.QWidget, name)
             if child is not None:
                 child.setVisible(False)
+        self._pinEffectGridLeft()
         self._configureSegmentsTable()
         self.logic.editorWidget = self.editor
         # keep the save button as the last thing in the section
         box.removeWidget(self.saveAndNextButton)
         box.addWidget(self.saveAndNextButton)
+
+        # picking a row in the editor's segment list must move the combo too
+        self.editor.connect(
+            "currentSegmentIDChanged(QString)", self.onEditorSegmentChanged
+        )
 
         self.effectFactorySingleton = slicer.qSlicerSegmentEditorEffectFactory.instance()
         self.effectFactorySingleton.connect(
@@ -1290,12 +1459,43 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         del effectName
         if self.editor is not None:
             self.editor.updateEffectList()
+            self._pinEffectGridLeft()  # updateEffectList rebuilds the grid
+
+    def _pinEffectGridLeft(self):
+        """Stop the effect buttons resizing as the options beside them change.
+
+        The buttons live in a QGridLayout whose columns share out whatever
+        width the group box has, so a wider set of options next door made every
+        button narrower and clicking around the row moved the targets.  An
+        empty stretch column past the last one soaks up the spare width instead
+        and leaves the buttons their natural size, against the left edge.
+        """
+        if self.editor is None:
+            return
+        effects = self.editor.findChild(qt.QWidget, "EffectsGroupBox")
+        grid = effects.layout() if effects is not None else None
+        if grid is None or not hasattr(grid, "setColumnStretch"):
+            return
+        try:
+            grid.setColumnStretch(grid.columnCount(), 1)
+        except Exception:  # noqa: BLE001 - layout without column stretch
+            logging.debug("GTReview: pinning the effect grid failed", exc_info=True)
 
     def _configureSegmentsTable(self):
-        """Two fixed rows (label 1, label 2): no opacity/status columns, no renames."""
+        """Hide the editor's segment list; the Active label box replaces it.
+
+        The widget itself has to stay alive -- the editor keeps its current
+        segment through it -- so the resizable frame around it is hidden rather
+        than removed, and the rest of the tidying below still runs in case a
+        future change shows it again.
+        """
         table = self.editor.findChild(qt.QWidget, "SegmentsTableView") if self.editor else None
         if table is None:
             return
+        for name in ("SegmentsTableResizableFrame", "SegmentsTableView"):
+            widget = self.editor.findChild(qt.QWidget, name)
+            if widget is not None:
+                widget.setVisible(False)
         for name, value in (("opacityColumnVisible", False), ("statusColumnVisible", False),
                             ("visibilityColumnVisible", False), ("readOnly", True)):
             try:
@@ -1390,6 +1590,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # sets a sensible default label; it is not re-forced here.
             self._initialiseBrush()
             self._constrainBrush()
+            self._applyImmediatePaint()
         # the sphere effect reports what it did; relay it once it applied
         self._relaySphereThresholdResult()
 
@@ -1549,7 +1750,6 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             ("a", qt.Qt.Key_A, none, "a", self.onMaskMoreTransparent),
             ("s", qt.Qt.Key_S, none, "s", self.onToggleMaskVisible),
             ("d", qt.Qt.Key_D, none, "d", self.onMaskMoreOpaque),
-            ("f", qt.Qt.Key_F, none, "f", self.onFlipLesionLabel),
             ("1", qt.Qt.Key_1, none, "1", functools.partial(self.onActivateEffect, "Paint")),
             ("2", qt.Qt.Key_2, none, "2", functools.partial(self.onActivateEffect, "Erase")),
             ("3", qt.Qt.Key_3, none, "3",
@@ -1866,6 +2066,9 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         with BusyCursor("GTReview: loading {} ...".format(case.case_id)):
             self.logic.loadCase(case, maskPath=maskPath)
         self.unsavedChanges = False
+        # fingerprints of the previous case's strokes mean nothing here
+        self._strokeStarts = []
+        self._redoTargets = []
 
         self._updateMaskSourceComboBox()
         self._populateVolumeComboBoxes()
@@ -1906,13 +2109,25 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if editorNode is not None:
             try:
                 editorNode.SetSourceVolumeIntensityMask(False)
-                editorNode.SetMaskMode(editorNode.PaintAllowedEverywhere)
-                editorNode.SetOverwriteMode(editorNode.OverwriteAllSegments)  # one label per voxel
+                # The EditAllowed* enum lives on the segmentation node, not on
+                # the editor node: reading PaintAllowedEverywhere off the editor
+                # node raised AttributeError here, the except below swallowed it,
+                # and neither the mask mode NOR the overwrite mode on the next
+                # line was ever reset -- so a mode really could leak between
+                # cases, which is the one thing this block exists to stop.
+                editorNode.SetMaskMode(
+                    slicer.vtkMRMLSegmentationNode.EditAllowedEverywhere)
+                editorNode.SetOverwriteMode(
+                    slicer.vtkMRMLSegmentEditorNode.OverwriteAllSegments)  # one label per voxel
             except Exception:  # noqa: BLE001 - older node API
                 logging.debug("GTReview: resetting the editor node failed", exc_info=True)
         segmentIds = self.logic.segmentIds()
         if segmentIds:
             self.editor.setCurrentSegmentID(segmentIds[0])
+        # segment IDs are new for every case, so the Paint over choice has to be
+        # translated again against this case's segments
+        self.applyPaintOver()
+        self._syncActiveLabelComboBox()
 
     def _updateMaskSourceComboBox(self):
         previous = self._updatingGui
@@ -2189,7 +2404,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "Tick every lesion as Done first ({} of {} done).".format(done, total)
             )
 
-        # Del deletes the selected lesion, f flips its label -- keyboard only.
+        # Del deletes the selected lesion -- keyboard only.
         self._setEditorEditable(hasCase and hasEditor and (lesion is not None or newMode))
 
     # ------------------------------------------------------------ display slots
@@ -2279,6 +2494,85 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             except AttributeError:  # pragma: no cover - Slicer < 5.6
                 logging.debug("GTReview: SetSliceEdgeVisibility3D unavailable")
                 sliceNode.SetSliceVisible(True)
+        self.applySliceOrientation()
+        self._installStrokeObservers()
+
+    def _installStrokeObservers(self):
+        """Notice when a paint stroke begins, in every slice view.
+
+        A stroke is a mouse-down, a drag and a mouse-up; Slicer saves an undo
+        state per brush stamp in between.  Remembering what the mask looked
+        like at mouse-down is what lets Undo step back over the whole stroke
+        instead of one stamp at a time.
+        """
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return
+        wanted = []
+        for name in layoutManager.sliceViewNames():
+            widget = layoutManager.sliceWidget(name)
+            if widget is None:
+                continue
+            try:
+                interactor = widget.sliceView().interactorStyle().GetInteractor()
+            except Exception:  # noqa: BLE001 - view still being built
+                continue
+            if interactor is not None:
+                wanted.append(interactor)
+        known = [interactor for interactor, _tag in self._strokeObservers]
+        for interactor in wanted:
+            if interactor in known:
+                continue
+            # ahead of the effects, so the fingerprint is the pre-stroke mask
+            tag = interactor.AddObserver(
+                vtk.vtkCommand.LeftButtonPressEvent, self._onStrokeStart, 100.0
+            )
+            self._strokeObservers.append((interactor, tag))
+
+    def _onStrokeStart(self, caller=None, event=None):
+        del caller, event
+        if self.editor is None:
+            return
+        effect = self.editor.activeEffect()
+        if effect is None or effect.name not in ("Paint", "Erase"):
+            return
+        fingerprint = self._maskFingerprint()
+        if fingerprint is None:
+            return
+        self._redoTargets = []  # a new edit invalidates the redo trail
+        self._strokeStarts.append(fingerprint)
+        del self._strokeStarts[: -self.MAX_STROKE_MARKS]
+
+    def applySliceOrientation(self):
+        """Point the slice views at the mask's voxel grid, or back at anatomy.
+
+        The anatomical preset each view started from is stashed on the node
+        itself, because rotating turns its orientation into "Reformat" and the
+        name would otherwise be gone by the time the box is unticked.
+        """
+        if self.alignSlicesCheckBox is None:
+            return
+        aligned = bool(self.alignSlicesCheckBox.checked)
+        volume = self.logic.referenceVolumeNode if self.logic is not None else None
+        if aligned and volume is None:
+            return  # nothing loaded yet; the next case load re-applies this
+        for sliceNode in slicer.util.getNodesByClass("vtkMRMLSliceNode"):
+            name = sliceNode.GetOrientation()
+            if aligned:
+                if name != "Reformat":
+                    sliceNode.SetAttribute("GTReview.Orientation", name)
+                sliceNode.RotateToVolumePlane(volume)
+            else:
+                restored = sliceNode.GetAttribute("GTReview.Orientation")
+                if restored:
+                    sliceNode.SetOrientation(restored)
+
+    @guarded("Aligning the slice views")
+    def onAlignSlicesChanged(self, checked=None):
+        del checked
+        if self._updatingGui:
+            return
+        self.applySliceOrientation()
 
     def applyViewLayers(self):
         if not slicer.app.layoutManager():
@@ -2286,6 +2580,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         background = self._backgroundNode()
         foreground = self._foregroundNode()
         opacity = float(self.opacitySlider.value)
+        # the contrast widget edits the display node of whatever is in Image
+        if self.windowLevelWidget is not None:
+            self.windowLevelWidget.setMRMLVolumeNode(background)
+            self.windowLevelWidget.setEnabled(background is not None)
         for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
             compositeNode.SetBackgroundVolumeID(background.GetID() if background else "")
             compositeNode.SetForegroundVolumeID(foreground.GetID() if foreground else "")
@@ -2415,14 +2713,13 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             for row, lesion in enumerate(self.lesionList):
                 values = (
                     lesion.index,
-                    lesion.label,
                     lesion.voxel_count,
                     round(float(lesion.volume_mm3), 1),
                 )
                 for column, value in enumerate(values):
                     item = qt.QTableWidgetItem()
                     item.setData(qt.Qt.DisplayRole, value)
-                    if column == 0:
+                    if column == self.LESION_COLUMN_NUMBER:
                         item.setData(qt.Qt.UserRole, int(lesion.index))
                     self.lesionTable.setItem(row, column, item)
                 done = qt.QTableWidgetItem()
@@ -2434,10 +2731,12 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 )
                 done.setData(qt.Qt.UserRole, int(lesion.index))
                 done.setToolTip("Tick once you are happy with this lesion.")
-                self.lesionTable.setItem(row, 4, done)
+                self.lesionTable.setItem(row, self.LESION_COLUMN_DONE, done)
             self.lesionTable.setSortingEnabled(True)
             column, order = self._lesionSortState()
             self.lesionTable.sortItems(column, order)
+            # after the sort, not before: see _installLesionDeleteButtons
+            self._installLesionDeleteButtons()
             self._resizeLesionTable()
             self._restoreLesionSelection()
         finally:
@@ -2510,7 +2809,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     @guarded("Marking the lesion")
     def onLesionItemChanged(self, item=None):
-        if self._updatingGui or item is None or item.column() != 4:
+        if self._updatingGui or item is None or item.column() != self.LESION_COLUMN_DONE:
             return
         index = item.data(qt.Qt.UserRole)
         if index is None:
@@ -2530,9 +2829,64 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             order = header.sortIndicatorOrder()
         except Exception:  # noqa: BLE001 - binding differences
             column, order = -1, qt.Qt.DescendingOrder
-        if column < 0 or column >= self.lesionTable.columnCount:
-            return 2, qt.Qt.DescendingOrder  # voxels, largest first
+        if (column < 0 or column >= self.lesionTable.columnCount
+                or column == self.LESION_DELETE_COLUMN):
+            return self.LESION_COLUMN_VOXELS, qt.Qt.DescendingOrder  # largest first
         return column, order
+
+    def _installLesionDeleteButtons(self):
+        """(Re)create the per-row delete buttons for the current row order.
+
+        QTableWidget sorting moves the *items* but leaves cell widgets in the
+        cells they were put in, so a button created before a sort would end up
+        next to a different lesion than the one it deletes.  Rebuilding from
+        the row order every time is cheap (the table caps at a screenful) and
+        removes the whole class of bug.
+        """
+        table = self.lesionTable
+        icon = qt.QIcon(":/Icons/Delete.png")
+        if icon.pixmap(16, 16).isNull():
+            icon = slicer.app.style().standardIcon(qt.QStyle.SP_TrashIcon)
+        for row in range(table.rowCount):
+            item = table.item(row, 0)
+            if item is None:
+                continue
+            index = int(item.data(qt.Qt.UserRole))
+            button = qt.QToolButton()
+            button.setIcon(icon)
+            button.setIconSize(qt.QSize(14, 14))
+            button.setAutoRaise(True)
+            button.toolTip = (
+                "Delete lesion {} -- removes every one of its voxels from both "
+                "labels.\nUndoable with Ctrl+Z; nothing is written to disk until "
+                "you save.".format(index)
+            )
+            button.connect("clicked()", functools.partial(self._onDeleteLesionRow, index))
+            table.setCellWidget(row, self.LESION_DELETE_COLUMN, button)
+
+    def _onDeleteLesionRow(self, lesionIndex):
+        """Delete the lesion this row's button belongs to.
+
+        The row is selected first with the slots running normally, so the
+        highlight and the brush label follow the click before anything is
+        removed -- and a delete that bails out still leaves the selection
+        where the user just pointed.
+        """
+        for row in range(self.lesionTable.rowCount):
+            item = self.lesionTable.item(row, 0)
+            if item is not None and item.data(qt.Qt.UserRole) == lesionIndex:
+                self.lesionTable.selectRow(row)
+                break
+        else:
+            return
+        self.onDeleteLesion()
+
+    def onLesionSortChanged(self, column, order):
+        """Bounce a sort on the delete column back to the voxel-count sort."""
+        del order
+        if int(column) != self.LESION_DELETE_COLUMN or self._updatingGui:
+            return
+        self.lesionTable.sortItems(self.LESION_COLUMN_VOXELS, qt.Qt.DescendingOrder)
 
     def _resizeLesionTable(self):
         """Height the table to its contents, up to LESION_TABLE_MAX_ROWS."""
@@ -2676,12 +3030,203 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if lesion is not None:
             self.jumpToLesion(lesion)
 
+    @staticmethod
+    def _historyIcon(kind, size=18, scale=6):
+        """Draw the undo / redo / reset / plus glyph.
+
+        Rendered at *scale* times the logical size so it stays sharp on a hidpi
+        panel, in the palette's button colour so it follows the Slicer theme.
+        "undo" and "redo" are half arcs mirrored about the vertical, "reset" is
+        a near-full circle and "plus" a cross -- drawn in one hand, at one
+        stroke weight, so the buttons read as one family.
+        """
+        box = int(size * scale)
+        pixmap = qt.QPixmap(box, box)
+        pixmap.fill(qt.QColor(0, 0, 0, 0))
+        painter = qt.QPainter()
+        painter.begin(pixmap)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            color = slicer.app.palette().color(qt.QPalette.ButtonText)
+            pen = qt.QPen(color)
+            pen.setWidthF(box * 0.12)
+            pen.setCapStyle(qt.Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(qt.QBrush())
+            if kind == "plus":
+                arm = box * 0.30
+                centre = box / 2.0
+                painter.drawLine(qt.QPointF(centre - arm, centre),
+                                 qt.QPointF(centre + arm, centre))
+                painter.drawLine(qt.QPointF(centre, centre - arm),
+                                 qt.QPointF(centre, centre + arm))
+            else:
+                radius = box * 0.30
+                centreX = box / 2.0
+                centreY = box / 2.0 + (box * 0.09 if kind != "reset" else 0.0)
+                # the arcs stop short of the horizontal so the head has room: at
+                # 20 px a head any smaller than this disappears into the stroke
+                start, sweep = {
+                    "undo": (10.0, 160.0),
+                    "redo": (170.0, -160.0),
+                }.get(kind, (250.0, 300.0))
+                painter.drawArc(
+                    qt.QRectF(centreX - radius, centreY - radius, 2 * radius, 2 * radius),
+                    int(round(start * 16)), int(round(sweep * 16)),
+                )
+                # a filled head on the tangent at the far end of the arc
+                end = math.radians(start + sweep)
+                travel = 1.0 if sweep > 0 else -1.0
+                tipX = centreX + radius * math.cos(end)
+                tipY = centreY - radius * math.sin(end)
+                dx = -math.sin(end) * travel
+                dy = -math.cos(end) * travel
+                head = box * 0.34
+                path = qt.QPainterPath()
+                path.moveTo(qt.QPointF(tipX + dx * head * 0.85, tipY + dy * head * 0.85))
+                path.lineTo(qt.QPointF(tipX - dx * head * 0.15 - dy * head * 0.55,
+                                       tipY - dy * head * 0.15 + dx * head * 0.55))
+                path.lineTo(qt.QPointF(tipX - dx * head * 0.15 + dy * head * 0.55,
+                                       tipY - dy * head * 0.15 - dx * head * 0.55))
+                path.closeSubpath()
+                painter.fillPath(path, qt.QBrush(color))
+        finally:
+            painter.end()
+        return qt.QIcon(pixmap)
+
+    @staticmethod
+    def _labelIcon(value, size=12):
+        """A filled swatch in the label's own colour, for the combo boxes.
+
+        Label 0 is the background, which has no colour of its own: it gets an
+        empty box with a slash through it, the way a "no fill" swatch is drawn.
+        """
+        if int(value) == GTReviewWidget.ACTIVE_LABEL_BACKGROUND:
+            pixmap = qt.QPixmap(size, size)
+            pixmap.fill(qt.QColor(0, 0, 0, 0))
+            painter = qt.QPainter()
+            painter.begin(pixmap)
+            try:
+                painter.setRenderHint(qt.QPainter.Antialiasing, True)
+                pen = qt.QPen(slicer.app.palette().color(qt.QPalette.ButtonText))
+                pen.setWidthF(1.2)
+                painter.setPen(pen)
+                painter.drawRect(qt.QRectF(0.75, 0.75, size - 1.5, size - 1.5))
+                painter.drawLine(qt.QPointF(1.5, size - 1.5), qt.QPointF(size - 1.5, 1.5))
+            finally:
+                painter.end()
+            return qt.QIcon(pixmap)
+        red, green, blue = colorForLabelValue(int(value))
+        pixmap = qt.QPixmap(size, size)
+        pixmap.fill(qt.QColor.fromRgbF(red, green, blue))
+        return qt.QIcon(pixmap)
+
+    @guarded("Choosing the active label")
+    def onActiveLabelChanged(self, index=None):
+        del index
+        if self._updatingGui or self.activeLabelComboBox is None:
+            return
+        value = self.activeLabelComboBox.itemData(self.activeLabelComboBox.currentIndex)
+        if value is None:
+            return
+        if int(value) == self.ACTIVE_LABEL_BACKGROUND:
+            self.onActivateEffect("Erase")
+            return
+        self._selectSegmentForLabel(int(value))
+        # Coming back from Background: leaving Erase armed would keep taking
+        # voxels away while the box says a label is being painted.  The effect
+        # is switched directly rather than through onActivateEffect, which
+        # re-selects the segment of the currently selected lesion and would
+        # undo the label just picked here.
+        effect = self.editor.activeEffect() if self.editor is not None else None
+        if effect is not None and effect.name == "Erase":
+            self.editor.setActiveEffectByName("Paint")
+            self._syncActiveLabelComboBox()
+
+    def onEditorSegmentChanged(self, segmentId=None):
+        """Mirror the editor's segment list back into the Active label box."""
+        del segmentId
+        if self._updatingGui:
+            return
+        self._syncActiveLabelComboBox()
+
+    def _syncActiveLabelComboBox(self):
+        if self.activeLabelComboBox is None or self.editor is None:
+            return
+        effect = self.editor.activeEffect()
+        erasing = effect is not None and effect.name == "Erase"
+        current = self.editor.currentSegmentID()
+        if not erasing and not current:
+            return
+        previous = self._updatingGui
+        self._updatingGui = True
+        try:
+            # Erase IS painting the background, however it was reached -- the
+            # Erase button, the 2 key or this box -- so the box says so
+            wanted = self.ACTIVE_LABEL_BACKGROUND if erasing else next(
+                (value for value in LABEL_NAMES
+                 if self.logic.segmentIdForLabelValue(value) == current), None)
+            if wanted is None:
+                return
+            index = self.activeLabelComboBox.findData(int(wanted))
+            if index >= 0:
+                self.activeLabelComboBox.currentIndex = index
+        finally:
+            self._updatingGui = previous
+
+    @guarded("Choosing what may be painted over")
+    def onPaintOverChanged(self, index=None):
+        del index
+        if self._updatingGui:
+            return
+        self.applyPaintOver()
+
+    def applyPaintOver(self):
+        """Translate the Paint over choice into the editor node's mask mode.
+
+        "Background only" and "Only <label>" are Slicer's EditAllowedOutside-
+        AllSegments and EditAllowedInsideSingleSegment.  The overwrite mode
+        stays OverwriteAllSegments throughout: the two labels are mutually
+        exclusive in the saved NIfTI, so painting one has to take the voxel
+        away from the other -- that is not what Paint over is asking about.
+        """
+        node = self.segmentEditorNode
+        if node is None or self.paintOverComboBox is None or self.logic is None:
+            return
+        choice = self.paintOverComboBox.itemData(self.paintOverComboBox.currentIndex)
+        segmentations = slicer.vtkMRMLSegmentationNode
+        try:
+            if choice == self.PAINT_OVER_BACKGROUND:
+                node.SetMaskMode(segmentations.EditAllowedOutsideAllSegments)
+                node.SetMaskSegmentID("")
+            elif choice is not None and int(choice) in LABEL_NAMES:
+                segmentId = self.logic.segmentIdForLabelValue(int(choice))
+                if not segmentId:
+                    return  # no case loaded yet; _attachEditor re-applies this
+                # the ID first: the node refuses EditAllowedInsideSingleSegment
+                # while MaskSegmentID is still empty and silently stays on the
+                # previous mode
+                node.SetMaskSegmentID(segmentId)
+                node.SetMaskMode(segmentations.EditAllowedInsideSingleSegment)
+            else:
+                node.SetMaskMode(segmentations.EditAllowedEverywhere)
+                node.SetMaskSegmentID("")
+            node.SetOverwriteMode(
+                slicer.vtkMRMLSegmentEditorNode.OverwriteAllSegments
+            )
+        except Exception:  # noqa: BLE001 - older node API
+            logging.debug("GTReview: setting the paint-over mask failed", exc_info=True)
+
     def _selectSegmentForLabel(self, labelValue):
         if self.editor is None:
             return
         segmentId = self.logic.segmentIdForLabelValue(labelValue)
         if segmentId:
             self.editor.setCurrentSegmentID(segmentId)
+            # setCurrentSegmentID does not emit currentSegmentIDChanged, so
+            # every programmatic path -- selecting a lesion above all -- has to
+            # move the combo itself or the two disagree on screen
+            self._syncActiveLabelComboBox()
 
     @guarded("Jumping to the lesion")
     def onJumpToLesion(self):
@@ -2828,6 +3373,22 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         lesion = self._requireLesion()
         if lesion is None:
             return
+        # Both entry points are one gesture away from losing a lesion -- the
+        # Delete key, and a trash button sitting next to the Done checkbox --
+        # so the count and the label are spelled out before anything goes.
+        if not slicer.util.confirmYesNoDisplay(
+            "Delete lesion {} ({})?\n\n"
+            "{} voxels, {:.1f} mm3, removed from both labels.\n"
+            "This can be undone (Ctrl+Z), and nothing is written to disk "
+            "until you save.".format(
+                lesion.index,
+                nameForLabelValue(int(lesion.label)),
+                lesion.voxel_count,
+                float(lesion.volume_mm3),
+            ),
+            windowTitle="GTReview",
+        ):
+            return
         mask = lesions.lesion_mask(self.componentMap, lesion.index)
         with BusyCursor("GTReview: deleting lesion {} ...".format(lesion.index)):
             self.logic.deleteLesionVoxels(mask)
@@ -2930,7 +3491,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if self.lesionsStale:
             self.refreshLesions()
-        value = int(self.newLesionLabelComboBox.itemData(self.newLesionLabelComboBox.currentIndex))
+        value = self._activeLabelValue()
         # Lesion numbers are re-assigned on every recount, so the lesions that
         # exist NOW are remembered by a seed voxel each (centroids always lie
         # inside their component) plus their size; see _adoptNewLesion.
@@ -2951,12 +3512,33 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             6000,
         )
 
+    def _activeLabelValue(self):
+        """The label a new lesion should be painted with.
+
+        The Active label box can be sitting on Background, which is the Erase
+        tool and cannot start a lesion; fall back to the first real label.
+        """
+        value = None
+        if self.activeLabelComboBox is not None:
+            value = self.activeLabelComboBox.itemData(
+                self.activeLabelComboBox.currentIndex
+            )
+        if value is None or int(value) not in LABEL_NAMES:
+            return min(LABEL_NAMES)
+        return int(value)
+
     def _cancelNewLesion(self):
         if self._newLesion is None:
             return
         self._newLesion = None
-        if hasattr(self, "newLesionButton"):
-            self._updateEditingControls()  # locks the brush again unless a row is selected
+        if self.newLesionButton is not None:
+            previous = self._updatingGui
+            self._updatingGui = True
+            try:
+                self.newLesionButton.checked = False
+            finally:
+                self._updatingGui = previous
+        self._updateEditingControls()  # locks the brush again unless a row is selected
 
     def _adoptNewLesion(self):
         """After a recount in new-lesion mode, select what was just painted."""
@@ -2983,6 +3565,13 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if chosen is None:
             return  # nothing painted yet (or below "Min voxels"): stay in the mode
         self._newLesion = None
+        if self.newLesionButton is not None:
+            previous = self._updatingGui
+            self._updatingGui = True
+            try:
+                self.newLesionButton.checked = False
+            finally:
+                self._updatingGui = previous
         self.selectedLesionIndex = chosen.index
         self.selectedLesionSeed = tuple(int(v) for v in chosen.centroid_ijk)
         self._selectRowForLesionIndex(chosen.index)
@@ -3018,8 +3607,33 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if lesion is not None:
                 self._selectSegmentForLabel(lesion.label)
         self.editor.setActiveEffectByName(name)
+        # the segment was selected above, before the effect changed, so the
+        # sync it triggered could not know Erase was about to become active
+        self._syncActiveLabelComboBox()
+        self._applyImmediatePaint()
         self._initialiseBrush()
         self._updateEditingControls()
+
+    def _applyImmediatePaint(self):
+        """Commit each brush stamp as it is drawn, not on mouse release.
+
+        Slicer's Paint and Erase default to "delayed paint": the drag only
+        leaves outlined circles behind and the labelmap is written once, when
+        the button comes up.  Reviewers reading the result as they go want the
+        segmentation to follow the cursor, the way ITK-SNAP paints, so the
+        outlines are traded for a live fill.  Only the two C++ brush effects
+        have the setting -- the scripted Sphere threshold has its own preview
+        and is skipped.
+        """
+        if self.editor is None:
+            return
+        effect = self.editor.activeEffect()
+        if effect is None or not hasattr(effect, "setDelayedPaint"):
+            return
+        try:
+            effect.setDelayedPaint(False)
+        except Exception:  # noqa: BLE001 - effect without the property
+            logging.debug("GTReview: setDelayedPaint unavailable", exc_info=True)
 
     def _initialiseBrush(self):
         """A sensible absolute brush the first time a brush is activated."""
@@ -3091,7 +3705,11 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     @guarded("Undo")
     def onUndo(self):
         if self.editor is not None:
-            self.editor.undo()
+            target = self._strokeStarts.pop() if self._strokeStarts else None
+            here = self._maskFingerprint()
+            self._stepHistory(self.editor.undo, target)
+            if target is not None and here is not None:
+                self._redoTargets.append(here)
             self.setLesionsStale(True)
             if self.autoRefreshCheckBox.checked:
                 self.refreshLesions()
@@ -3099,10 +3717,68 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     @guarded("Redo")
     def onRedo(self):
         if self.editor is not None:
-            self.editor.redo()
+            target = self._redoTargets.pop() if self._redoTargets else None
+            here = self._maskFingerprint()
+            self._stepHistory(self.editor.redo, target)
+            if target is not None and here is not None:
+                self._strokeStarts.append(here)
             self.setLesionsStale(True)
             if self.autoRefreshCheckBox.checked:
                 self.refreshLesions()
+
+    #: how many identical history states one Undo/Redo press will step over
+    HISTORY_SKIP_LIMIT = 4
+    #: how far Undo will walk back looking for the start of a stroke
+    HISTORY_STROKE_LIMIT = 60
+    #: how many stroke starts are remembered
+    MAX_STROKE_MARKS = 60
+
+    def _maskFingerprint(self):
+        """Cheap content signature of the mask, to spot a no-op history step."""
+        node = self.logic.segmentationNode if self.logic is not None else None
+        if node is None:
+            return None
+        signature = []
+        for segmentId in self.logic.segmentIds():
+            try:
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(node, segmentId)
+            except Exception:  # noqa: BLE001 - segment without a labelmap yet
+                signature.append(None)
+                continue
+            if array is None:
+                signature.append(None)
+            else:
+                signature.append((array.shape, int(np.count_nonzero(array))))
+        return tuple(signature)
+
+    def _stepHistory(self, step, target=None):
+        """Walk the history until the mask really moves, or *target* is reached.
+
+        Two problems are being papered over here, both from painting without
+        Slicer's delayed paint.  Slicer calls paintApply once more when the
+        mouse comes up and paintApply always saves a state first, so the top of
+        the stack is a duplicate of the current mask and a single step looks
+        like it did nothing.  And a stroke is not one state but one per brush
+        stamp, so stepping once would rub out a few voxels of a long stroke.
+
+        With *target* -- the fingerprint taken at mouse-down -- the walk
+        continues until the mask matches it again, which undoes the stroke as a
+        unit.  Without one, it only steps past states that change nothing.
+        """
+        before = self._maskFingerprint()
+        if before is None:
+            step()
+            return
+        if target is not None:
+            for _ in range(self.HISTORY_STROKE_LIMIT):
+                step()
+                if self._maskFingerprint() == target:
+                    return
+            return  # ran out of history: leave it where it got to
+        for _ in range(self.HISTORY_SKIP_LIMIT):
+            step()
+            if self._maskFingerprint() != before:
+                return
 
     @guarded("Resetting the case")
     def onReset(self):

@@ -83,6 +83,7 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.radiusMm = 0.0
         self._imageCache = None  # (image object, array_kji, extent)
         self.readoutLabel = None
+        self.twoDCheckBox = None
         self.lastApplied = None  # (voxels, lower, upper, radius_mm) for GTReview's status line
 
     # ------------------------------------------------------------ boilerplate
@@ -106,8 +107,9 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         return (
             "<html><b>Click</b> the centre of a lesion, <b>drag</b> outward to pull a "
             "sphere, <b>release</b> to add every voxel in the sphere whose intensity "
-            "is within the tolerance of the clicked voxel and connected to it.  One "
-            "undo step; the result is a voxel mask.</html>"
+            "is within the tolerance of the clicked voxel and connected to it.  Tick "
+            "<b>2D</b> to keep only the slice you drew on.  One undo step; the result "
+            "is a voxel mask.</html>"
         )
 
     # ------------------------------------------------------------ parameters
@@ -115,6 +117,7 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.setParameterDefault("TolerancePercent", 25.0)
         self.scriptedEffect.setParameterDefault("Mode", MODE_SIMILAR)
         self.scriptedEffect.setParameterDefault("ConnectedOnly", 1)
+        self.scriptedEffect.setParameterDefault("TwoD", 0)
 
     def tolerancePercent(self):
         return float(self.scriptedEffect.doubleParameter("TolerancePercent"))
@@ -124,6 +127,9 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
 
     def connectedOnly(self):
         return bool(self.scriptedEffect.integerParameter("ConnectedOnly"))
+
+    def twoDimensional(self):
+        return bool(self.scriptedEffect.integerParameter("TwoD"))
 
     def setupOptionsFrame(self):
         self.toleranceSlider = slicer.qMRMLSliderWidget() if hasattr(slicer, "qMRMLSliderWidget") else None
@@ -157,16 +163,28 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         )
         self.scriptedEffect.addOptionsWidget(self.connectedCheckBox)
 
-        self.readoutLabel = qt.QLabel("Click the centre of a lesion, then drag.")
-        self.readoutLabel.setWordWrap(True)
-        self.scriptedEffect.addOptionsWidget(self.readoutLabel)
+        self.twoDCheckBox = qt.QCheckBox("2D: this slice only")
+        self.twoDCheckBox.setToolTip(
+            "Segment a disc on the slice you are looking at instead of a ball "
+            "through the ones you are not.\n"
+            "Use it when a lesion is only convincing on one slice: a sphere wide "
+            "enough to cover it in-plane also reaches the slice above and below, "
+            "and those voxels have to be erased again."
+        )
+        self.scriptedEffect.addOptionsWidget(self.twoDCheckBox)
+
+        # No readout widget: the same sentences go to the status bar via
+        # _setReadout, and a label that grows and reflows under the options
+        # shifted every control below it after each drag.
 
         self.toleranceSlider.connect("valueChanged(double)", self.updateMRMLFromGUI)
         self.modeComboBox.connect("currentIndexChanged(int)", self.updateMRMLFromGUI)
         self.connectedCheckBox.connect("toggled(bool)", self.updateMRMLFromGUI)
+        self.twoDCheckBox.connect("toggled(bool)", self.updateMRMLFromGUI)
 
     def updateGUIFromMRML(self):
-        widgets = (self.toleranceSlider, self.modeComboBox, self.connectedCheckBox)
+        widgets = (self.toleranceSlider, self.modeComboBox, self.connectedCheckBox,
+                   self.twoDCheckBox)
         for widget in widgets:
             widget.blockSignals(True)
         try:
@@ -174,6 +192,7 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
             index = self.modeComboBox.findData(self.mode())
             self.modeComboBox.currentIndex = index if index >= 0 else 0
             self.connectedCheckBox.checked = self.connectedOnly()
+            self.twoDCheckBox.checked = self.twoDimensional()
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
@@ -185,6 +204,7 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
             "Mode", str(self.modeComboBox.itemData(self.modeComboBox.currentIndex))
         )
         self.scriptedEffect.setParameter("ConnectedOnly", 1 if self.connectedCheckBox.checked else 0)
+        self.scriptedEffect.setParameter("TwoD", 1 if self.twoDCheckBox.checked else 0)
 
     # ------------------------------------------------------------ lifecycle
     def activate(self):
@@ -329,10 +349,59 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         seed_rel = tuple(int(seedIjk[a]) - extent[2 * a] for a in range(3))
         image_ijk = array_kji.transpose(2, 1, 0)
         lower, upper = self.currentRange(self._voxelValue(seedIjk, image))
-        return lesions.sphere_threshold_mask(
+        box, mask = lesions.sphere_threshold_mask(
             image_ijk, seed_rel, radiusMm, self._spacing(), lower, upper,
             connected=self.connectedOnly(),
         )
+        if not self.twoDimensional() or mask is None:
+            return box, mask
+        return box, self._flattenToSeedSlice(box, mask, seedIjk, extent)
+
+    def _flatAxis(self):
+        """Which image axis the slice being drawn on cuts across, or None.
+
+        The slice normal is a direction in world space; pushing it through the
+        volume's world-to-image rotation says which of i, j, k it lines up with,
+        and the largest component wins.  That is exact once the slice views are
+        aligned to the image grid and still the best answer when they are not.
+        """
+        widget = self.dragWidget
+        image = self.scriptedEffect.sourceVolumeImageData()
+        if widget is None or image is None:
+            return None
+        try:
+            sliceNode = widget.mrmlSliceNode()
+        except Exception:  # noqa: BLE001 - a 3D view has no slice node
+            return None
+        if sliceNode is None:
+            return None
+        sliceToRas = sliceNode.GetSliceToRAS()
+        normalWorld = [sliceToRas.GetElement(row, 2) for row in range(3)]
+        imageToWorld = vtk.vtkMatrix4x4()
+        image.GetImageToWorldMatrix(imageToWorld)
+        worldToImage = vtk.vtkMatrix4x4()
+        vtk.vtkMatrix4x4.Invert(imageToWorld, worldToImage)
+        components = [
+            abs(sum(worldToImage.GetElement(axis, col) * normalWorld[col]
+                    for col in range(3)))
+            for axis in range(3)
+        ]
+        return int(max(range(3), key=lambda axis: components[axis]))
+
+    def _flattenToSeedSlice(self, box, mask, seedIjk, extent):
+        """Keep only the plane of *mask* that holds the seed."""
+        axis = self._flatAxis()
+        if axis is None:
+            return mask  # drawn somewhere with no slice plane: leave the ball
+        plane = int(seedIjk[axis]) - extent[2 * axis] - (box[axis].start or 0)
+        if not 0 <= plane < mask.shape[axis]:
+            logging.debug("GTReview: 2D sphere threshold seed outside its own box")
+            return mask
+        flat = np.zeros_like(mask)
+        index = [slice(None)] * 3
+        index[axis] = slice(plane, plane + 1)
+        flat[tuple(index)] = mask[tuple(index)]
+        return flat
 
     def applyAt(self, seedIjk, radiusMm):
         """Grow from *seedIjk* (absolute image ijk) with *radiusMm*; one undo step.
@@ -384,7 +453,8 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
     def _radiusText(self, radiusMm):
         spacing = self._spacing()
         voxels = radiusMm / min(spacing) if min(spacing) > 0 else 0.0
-        return "{:.1f} voxels / {:.1f} mm".format(voxels, radiusMm)
+        text = "{:.1f} voxels / {:.1f} mm".format(voxels, radiusMm)
+        return text + ", this slice only" if self.twoDimensional() else text
 
     @staticmethod
     def _rangeText(lower, upper):
