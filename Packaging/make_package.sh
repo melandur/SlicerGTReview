@@ -35,13 +35,13 @@
 #   --revision        target Slicer revision, e.g. 34045.  Cosmetic on Linux and
 #                     Windows, LOAD-BEARING on macOS (see above)
 #   --slicer-version  major.minor, e.g. 5.10, when building without a --slicer
-#   --output          where to write the archive (default: the repository root)
+#   --output          where to write the archive (default: <repo>/Packages)
 #
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SLICER_DIR="${SLICER_HOME:-}"
-OUTPUT_DIR="$REPO"
+OUTPUT_DIR="$REPO/Packages"
 TARGET_OS=""
 REVISION=""
 SLICER_MINOR=""

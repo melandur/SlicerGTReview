@@ -80,6 +80,10 @@ GTReview.s4ext
 
 # Packages produced by CPack
 *.tar.gz
+# ...except the built extension packages.  Packages/ rather than dist/,
+# because dist/ is ignored wholesale by the python block below and git
+# will not descend into an ignored directory to honour an exception.
+!Packages/*.tar.gz
 *.zip
 
 # --- Editors / OS -----------------------------------------------------------

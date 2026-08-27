@@ -142,6 +142,9 @@ Notes:
 `Packaging/make_package.sh` builds an archive the Extensions Manager accepts
 through **Install from file**, straight from the source tree:
 
+A prebuilt archive is already committed in [`Packages/`](Packages/) — install
+that one and you need none of this. To build your own:
+
 ```bash
 Packaging/make_package.sh --slicer $SLICER                 # this machine
 Packaging/make_package.sh --slicer $SLICER --os win        # for a Windows user
