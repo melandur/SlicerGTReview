@@ -944,6 +944,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._panelNarrowed = False
         self._effectOptionsBox = None
         self.shortcutsFrame = None
+        self._effectGridBox = None
         # mask fingerprints taken at the start of each paint stroke, so one
         # Undo press can step back over the whole stroke
         self._strokeStarts = []
@@ -1338,8 +1339,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "It is painted with the Active label chosen below.  Esc cancels."
         )
         self.newLesionButton.connect("toggled(bool)", self.onNewLesionToggled)
-        newRow.addWidget(self.newLesionButton)
         newRow.addStretch(1)
+        newRow.addWidget(self.newLesionButton)
         box.addLayout(newRow)
 
         self.lesionTable = qt.QTableWidget()
@@ -1395,6 +1396,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # keyboard (Del deletes a lesion) so the panel stays uncluttered.
         historyRow = qt.QHBoxLayout()
         historyRow.setSpacing(4)
+        historyRow.addStretch(1)  # the buttons sit against the right edge
 
         def iconButton(kind, text, tooltip, slot):
             """One drawn glyph per action, with the label spelled out.
@@ -1424,7 +1426,6 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "reset", "Reset",
             "Reset all: reload the mask from disk, discarding all edits.",
             self.onReset)
-        historyRow.addStretch(1)
         box.addLayout(historyRow)
 
         self.saveAndNextButton = qt.QPushButton("Save && next case")
@@ -1529,7 +1530,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             child = self.editor.findChild(qt.QWidget, name)
             if child is not None:
                 child.setVisible(False)
-        self._pinEffectGridLeft()
+        self._moveEffectGridRight(box)
         self._moveEffectOptionsBelow(box)
         # With the segment list hidden and the options moved out, the editor
         # holds nothing but the tool row -- but it still had an expanding
@@ -1560,7 +1561,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         del effectName
         if self.editor is not None:
             self.editor.updateEffectList()
-            self._pinEffectGridLeft()  # updateEffectList rebuilds the grid
+            self._hugEffectGrid()  # updateEffectList rebuilds the grid
 
     def _moveEffectOptionsBelow(self, box):
         """Put each effect's options under the tool row instead of beside it.
@@ -1592,25 +1593,39 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """
         return self._effectOptionsBox if self._effectOptionsBox is not None else self.editor
 
-    def _pinEffectGridLeft(self):
-        """Stop the effect buttons resizing as the options beside them change.
+    def _moveEffectGridRight(self, box):
+        """Put the tool buttons against the right edge, at their natural size.
 
         The buttons live in a QGridLayout whose columns share out whatever
-        width the group box has, so a wider set of options next door made every
-        button narrower and clicking around the row moved the targets.  An
-        empty stretch column past the last one soaks up the spare width instead
-        and leaves the buttons their natural size, against the left edge.
+        width the group box is given, so left to itself the row stretches and
+        every button changes width as the options below it change.  Lifting the
+        box into a row of our own, behind a stretch, gives it exactly its size
+        hint and puts that against the right -- the same reparenting trick as
+        _moveEffectOptionsBelow, and it must stay ahead of that call so the two
+        rows end up in the intended order.
         """
         if self.editor is None:
             return
         effects = self.editor.findChild(qt.QWidget, "EffectsGroupBox")
-        grid = effects.layout() if effects is not None else None
-        if grid is None or not hasattr(grid, "setColumnStretch"):
+        if effects is None:
+            return
+        self._effectGridBox = effects
+        row = qt.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
+        row.addWidget(effects)
+        box.addLayout(row)
+        self._hugEffectGrid()
+
+    def _hugEffectGrid(self):
+        """Keep the tool row at its size hint; updateEffectList undoes this."""
+        effects = self._effectGridBox
+        if effects is None:
             return
         try:
-            grid.setColumnStretch(grid.columnCount(), 1)
-        except Exception:  # noqa: BLE001 - layout without column stretch
-            logging.debug("GTReview: pinning the effect grid failed", exc_info=True)
+            effects.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Maximum)
+        except Exception:  # noqa: BLE001 - binding differences
+            logging.debug("GTReview: sizing the effect grid failed", exc_info=True)
 
     def _configureSegmentsTable(self):
         """Hide the editor's segment list; the Active label box replaces it.
