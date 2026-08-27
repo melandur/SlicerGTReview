@@ -940,6 +940,9 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.activeLabelComboBox = None
         self.paintOverComboBox = None
         self.newLesionButton = None
+        self.deleteReviewButton = None
+        self._panelNarrowed = False
+        self._effectOptionsBox = None
         # mask fingerprints taken at the start of each paint stroke, so one
         # Undo press can step back over the whole stroke
         self._strokeStarts = []
@@ -1064,10 +1067,22 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.skipReviewedCheckBox.connect("toggled(bool)", self.onSkipReviewedToggled)
         form.addRow("", self.skipReviewedCheckBox)
 
+        maskRow = qt.QHBoxLayout()
+        maskRow.setSpacing(4)
         self.maskSourceComboBox = qt.QComboBox()
         self.maskSourceComboBox.toolTip = "Which mask of this case is being reviewed."
         self.maskSourceComboBox.connect("activated(int)", self.onMaskSourceChanged)
-        form.addRow("Mask source:", self.maskSourceComboBox)
+        maskRow.addWidget(self.maskSourceComboBox, 1)
+        self.deleteReviewButton = qt.QPushButton("Delete review")
+        self.deleteReviewButton.toolTip = (
+            "Delete this case's <case_id>_reviewed_seg.nii.gz and start the case "
+            "over from its original mask.\n"
+            "This one really does erase a file from disk -- Ctrl+Z does not "
+            "reach it."
+        )
+        self.deleteReviewButton.connect("clicked()", self.onDeleteReview)
+        maskRow.addWidget(self.deleteReviewButton)
+        form.addRow("Mask source:", maskRow)
 
         self.caseStatusLabel = qt.QLabel("No dataset loaded.")
         self.caseStatusLabel.wordWrap = False
@@ -1429,7 +1444,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.editor.setEffectNameOrder(list(self.EDITOR_EFFECTS))
         self.editor.unorderedEffectsVisible = False  # a property, not a slot, in 5.10
         self.editor.setEffectButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
-        self.editor.setEffectColumnCount(3)
+        # one row: None, Paint, Erase, Sphere threshold
+        self.editor.setEffectColumnCount(len(self.EDITOR_EFFECTS) + 1)
         box.addWidget(self.editor)
         # EffectHelpBrowser is the "Paint with a round brush... Show details."
         # line above every effect's options: prose about a tool the reviewer has
@@ -1439,6 +1455,16 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if child is not None:
                 child.setVisible(False)
         self._pinEffectGridLeft()
+        self._moveEffectOptionsBelow(box)
+        # With the segment list hidden and the options moved out, the editor
+        # holds nothing but the tool row -- but it still had an expanding
+        # vertical policy, so any spare height in the section opened up as a
+        # band of nothing between the tools and their settings.
+        self.editor.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
+        editorLayout = self.editor.layout()
+        if editorLayout is not None:
+            editorLayout.setContentsMargins(0, 0, 0, 0)
+            editorLayout.setSpacing(0)
         self._configureSegmentsTable()
         self.logic.editorWidget = self.editor
         # keep the save button as the last thing in the section
@@ -1460,6 +1486,36 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.editor is not None:
             self.editor.updateEffectList()
             self._pinEffectGridLeft()  # updateEffectList rebuilds the grid
+
+    def _moveEffectOptionsBelow(self, box):
+        """Put each effect's options under the tool row instead of beside it.
+
+        The editor lays the options group box out in the column next to the
+        buttons, and every effect asks for a different width there -- so the
+        tool row was a different size for each tool and the section reflowed on
+        every click.  Underneath, the options get the full panel width and the
+        row above them never moves.
+        """
+        if self.editor is None:
+            return
+        options = self.editor.findChild(qt.QWidget, "OptionsGroupBox")
+        if options is None:
+            return
+        # reparenting takes it out of the editor's grid; the editor keeps its
+        # own pointer to the widget and goes on filling it as effects change.
+        # It also takes the box out of the editor's QObject tree, so anything
+        # that reached the effect options through self.editor.findChild has to
+        # start from here instead -- see _effectOptionsRoot.
+        self._effectOptionsBox = options
+        box.addWidget(options)
+
+    def _effectOptionsRoot(self):
+        """Where the active effect's option widgets live.
+
+        The editor until _moveEffectOptionsBelow runs, the reparented group box
+        afterwards.  Searching the wrong one silently finds nothing.
+        """
+        return self._effectOptionsBox if self._effectOptionsBox is not None else self.editor
 
     def _pinEffectGridLeft(self):
         """Stop the effect buttons resizing as the options beside them change.
@@ -1606,7 +1662,34 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._muteMainWindowShortcuts()
         self.installShortcuts()
         self._setDataProbeVisible(False)
+        self._narrowModulePanel()
         self._updateEditingControls()
+
+    def _narrowModulePanel(self):
+        """Shrink the module panel to the narrowest Slicer will allow, once.
+
+        The views are where the work happens; the panel only has to be legible.
+        Its floor is Slicer's, not ours -- the sections themselves fit in about
+        385 px and the rest is the module selector and the dock's own margins.
+
+        Only the first entry per session does this: Slicer remembers the dock
+        width between runs, and a width dragged by hand should survive leaving
+        the module and coming back.
+        """
+        if self._panelNarrowed:
+            return
+        self._panelNarrowed = True
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None:
+            return
+        dock = mainWindow.findChild(qt.QDockWidget, "PanelDockWidget")
+        if dock is None:
+            return
+        try:
+            width = max(int(dock.minimumWidth), int(dock.minimumSizeHint.width()))
+            mainWindow.resizeDocks([dock], [width], qt.Qt.Horizontal)
+        except Exception:  # noqa: BLE001 - no resizeDocks in an older Qt
+            logging.debug("GTReview: resizing the module panel failed", exc_info=True)
 
     def exit(self):
         self._cancelNewLesion()
@@ -2270,6 +2353,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         self.caseStatusLabel.text = self._caseStatusHtml(case)
         self.caseStatusLabel.toolTip = self._caseStatusTooltip(case)
+        if self.deleteReviewButton is not None:
+            self.deleteReviewButton.enabled = case.is_reviewed
 
     @staticmethod
     def _elide(text, limit=52):
@@ -2530,12 +2615,25 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._strokeObservers.append((interactor, tag))
 
     def _onStrokeStart(self, caller=None, event=None):
+        """Mouse-down in a slice view with any effect armed starts an edit.
+
+        Not just Paint and Erase: a Sphere threshold drag is one edit too, and
+        leaving it unmarked made the next Undo walk back past it.
+        """
         del caller, event
-        if self.editor is None:
+        if self.editor is None or self.editor.activeEffect() is None:
             return
-        effect = self.editor.activeEffect()
-        if effect is None or effect.name not in ("Paint", "Erase"):
-            return
+        self._markEdit()
+
+    def _markEdit(self):
+        """Remember the mask as it stands, so one Undo press steps over the
+        edit about to happen.
+
+        Every logical edit needs a mark, not only the ones made with a brush.
+        onUndo pops the top of this stack unconditionally, so an edit that left
+        no mark of its own was undone together with whatever earlier stroke had
+        left the mark it found -- two operations for one Ctrl+Z.
+        """
         fingerprint = self._maskFingerprint()
         if fingerprint is None:
             return
@@ -3390,6 +3488,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         ):
             return
         mask = lesions.lesion_mask(self.componentMap, lesion.index)
+        self._markEdit()
         with BusyCursor("GTReview: deleting lesion {} ...".format(lesion.index)):
             self.logic.deleteLesionVoxels(mask)
         # the deleted lesion is gone and the rest get renumbered
@@ -3397,6 +3496,71 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.unsavedChanges = True
         self.refreshLesions()
         self._updateCaseControls()
+
+    @guarded("Deleting the review")
+    def onDeleteReview(self):
+        """Remove this case's reviewed_seg file and reload from the original.
+
+        Unlike everything else in this panel, this leaves the undo stack behind
+        and touches the dataset itself, so it asks first and names the file.
+        """
+        case = self.currentCase()
+        if case is None:
+            slicer.util.showStatusMessage("GTReview: load a case first.", 3000)
+            return
+        if not case.is_reviewed:
+            slicer.util.showStatusMessage(
+                "GTReview: {} has no saved review.".format(case.case_id), 3000
+            )
+            return
+        path = case.reviewed_path
+        # The usual unsaved-edits dialog must NOT be used here.  Its Save
+        # branch writes case.reviewed_path -- the very file this method is
+        # about to remove -- so answering Save reported success, and the next
+        # statement deleted the work.  The edits are named in the one prompt
+        # instead, and they go with the file.
+        pending = ""
+        if self.unsavedChanges:
+            pending = (
+                "\n\nThe unsaved edits in the editor are discarded with it; "
+                "saving them would only write the file being deleted."
+            )
+        if not slicer.util.confirmYesNoDisplay(
+            "Delete the saved review of {}?\n\n{}\n\n"
+            "The file is removed from disk and the case reopens from its "
+            "original mask.  This cannot be undone.{}".format(
+                case.case_id, path, pending
+            ),
+            windowTitle="GTReview",
+        ):
+            return
+        try:
+            os.remove(path)
+        except OSError as error:
+            slicer.util.errorDisplay(
+                "Could not delete {}:\n{}".format(path, error), windowTitle="GTReview"
+            )
+            return
+        self.unsavedChanges = False
+        # The Done ticks were recorded against the review that just went away,
+        # so leaving them would re-enable Save & next case on a case nobody has
+        # looked at since.
+        self.reviewedSeeds.pop(case.directory, None)
+        # is_reviewed re-checks the disk, so the case object needs no patching;
+        # the tick in the case list and the skip-reviewed filter do.  Re-running
+        # the filter can move the case, so it is found again by id rather than
+        # trusting the old index.
+        caseId = case.case_id
+        self._applyCaseFilter()
+        for index, candidate in enumerate(self.filteredCases):
+            if candidate.case_id == caseId:
+                self.currentCaseIndex = index
+                break
+        self._populateCaseComboBox()
+        self.loadCurrentCase()
+        slicer.util.showStatusMessage(
+            "GTReview: deleted the review of {}.".format(case.case_id), 4000
+        )
 
     @guarded("Deleting the label")
     def onDeleteLabel(self):
@@ -3420,6 +3584,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             windowTitle="GTReview",
         ):
             return
+        self._markEdit()
         with BusyCursor("GTReview: deleting label {} ...".format(label)):
             removed = self.logic.deleteLabelVoxels(label)
         self._clearLesionSelection()
@@ -3448,6 +3613,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         target = others[0]
         mask = lesions.lesion_mask(self.componentMap, lesion.index)
         with BusyCursor("GTReview: lesion {} -> label {} ...".format(lesion.index, target)):
+            self._markEdit()
             self.logic.changeLesionLabel(mask, target)
         self.unsavedChanges = True
         self.refreshLesions()
@@ -3673,13 +3839,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logging.debug("GTReview: bounding the brush failed", exc_info=True)
         # tighten the visible slider (step 1 mm, no decimals) and hide the
         # absolute/relative toggle so the brush cannot leave absolute mode
-        options = self.editor.findChild(qt.QWidget, "EffectsOptionsFrame")
+        root = self._effectOptionsRoot()
+        options = root.findChild(qt.QWidget, "EffectsOptionsFrame")
         if options is None:
             return
         for slider in options.findChildren(qt.QWidget):
             if slider.className() not in ("qMRMLSliderWidget", "ctkSliderWidget"):
                 continue
-            if not slider.isVisibleTo(self.editor):
+            if not slider.isVisibleTo(root):
                 continue
             try:
                 if "mm" not in str(slider.suffix):
@@ -3705,8 +3872,16 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     @guarded("Undo")
     def onUndo(self):
         if self.editor is not None:
-            target = self._strokeStarts.pop() if self._strokeStarts else None
             here = self._maskFingerprint()
+            # A mark whose edit changed nothing (a bare click that painted no
+            # voxel, a cancelled drag) is already the current state; using it
+            # as a target would step past a real edit looking for it.
+            target = None
+            while self._strokeStarts:
+                candidate = self._strokeStarts.pop()
+                if candidate != here:
+                    target = candidate
+                    break
             self._stepHistory(self.editor.undo, target)
             if target is not None and here is not None:
                 self._redoTargets.append(here)
@@ -3792,6 +3967,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             windowTitle="GTReview",
         ):
             return
+        # the ticks describe lesions in the edited mask that is being thrown
+        # away; keeping them would leave Save & next case unlocked over a mask
+        # nobody has reviewed
+        self.reviewedSeeds.pop(case.directory, None)
         self.loadCurrentCase(maskPath=self.logic.maskPath)
 
     # -------------------------------------------------------------- save slots

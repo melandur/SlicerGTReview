@@ -371,19 +371,29 @@ def write_mask(
     if directory and not os.path.isdir(directory):
         os.makedirs(directory, exist_ok=True)
 
+    # SimpleITK picks its format from the SUFFIX, so the scratch file has to
+    # carry the destination's own: writing a ".nii" through a ".nii.gz" temp
+    # produced a gzip stream under a plain-NIfTI name, which read_mask then
+    # could not open.
+    lowered = os.path.basename(path).lower()
+    suffix = next(
+        (ext for ext in sorted(NIFTI_EXTENSIONS, key=len, reverse=True)
+         if lowered.endswith(ext)),
+        ".nii.gz",
+    )
     fd, tmp_path = tempfile.mkstemp(
         prefix=".{}.".format(os.path.basename(path)),
-        suffix=".nii.gz",
+        suffix=suffix,
         dir=directory,
     )
     os.close(fd)
     try:
         try:
-            sitk.WriteImage(image, tmp_path, True)  # useCompression=True
+            sitk.WriteImage(image, tmp_path, suffix.endswith(".gz"))
         except TypeError:  # pragma: no cover - very old SimpleITK
             writer = sitk.ImageFileWriter()
             writer.SetFileName(tmp_path)
-            writer.SetUseCompression(True)
+            writer.SetUseCompression(suffix.endswith(".gz"))
             writer.Execute(image)
         try:
             fd = os.open(tmp_path, os.O_RDONLY)

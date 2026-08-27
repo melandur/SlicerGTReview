@@ -420,10 +420,6 @@ class TestPerformance(unittest.TestCase):
         self.assertLess(elapsed, 5.0, "find_lesions took %.3f s" % elapsed)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SphereThresholdMaskTest(unittest.TestCase):
     """sphere_threshold_mask: physical sphere, seed-connected, voxel-exact."""
 
@@ -484,3 +480,7 @@ class SphereThresholdMaskTest(unittest.TestCase):
         self.assertEqual(int(mask.sum()), 0, "seed out of range -> nothing")
         with self.assertRaises(ValueError):
             lesions.sphere_threshold_mask(image, (30, 0, 0), 1.0, (1, 1, 1), 0, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

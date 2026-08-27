@@ -26,20 +26,45 @@ and write the result to a new `_reviewed_seg.nii.gz` beside the source data.
   layout (Four-Up, 1x1 axial / sagittal / coronal, 2x2 slices, Conventional).
 - **Mask source picker** — start from `seg`, `gt`, `pred_seg`, any other mask
   present, an existing `reviewed_seg` (to resume), or an empty segmentation.
+- **Contrast** — window/level for the image layer, with Slicer's auto/manual
+  modes and modality presets. Display only; it never touches a voxel.
+- **Slice alignment** — the slice views are rotated onto the mask's own voxel
+  grid by default (`Slices: align to the image grid`). In this data the mask
+  sits a median 8.3 degrees off the anatomical axes, so the default anatomical
+  planes cut the voxel grid diagonally and a stroke drawn as a disc is
+  committed as a stair-stepped one. Untick for true axial / coronal / sagittal.
 - **Lesion list** — 26-connectivity connected components over the current mask,
-  in a sortable table of `#`, `Label`, `Voxels`, `Volume (mm3)`, default sorted
-  by volume descending. Selecting a row jumps every slice view to that lesion's
-  centre and highlights it. The centre is the centre of mass snapped to the
-  nearest voxel that is actually *inside* the lesion, so it never lands in a
-  hole or outside a crescent-shaped component.
-- **Editing tools** — on the selected lesion: Delete, Flip label (1 ↔ 2); a
-  brush grid with Paint, Erase and GTReview's own Sphere threshold (click the
-  centre, drag to pull a sphere); "New lesion" to paint a fresh component as
-  label 1 or 2; plus Undo, Redo and Reset-to-loaded. Only labels 1 and 2 exist
+  in a sortable table of `#`, `Voxels`, `Volume (mm3)`, `Done` and a per-row
+  delete button, default sorted by volume descending. Selecting a row jumps
+  every slice view to that lesion's centre and highlights it. The centre is the
+  centre of mass snapped to the nearest voxel that is actually *inside* the
+  lesion, so it never lands in a hole or outside a crescent-shaped component.
+  **Lesion numbers are a rank by size, not an identity**: they are reassigned on
+  every recount, so a lesion's `#` changes when another lesion is painted,
+  deleted or grows past it. *Done* is tracked by seed voxel, not by number, so
+  the ticks survive the renumbering.
+- **Editing tools** — `Active label` chooses what the brush lays down (label 1,
+  label 2, or Background, which is the Erase tool); `Paint over` chooses what
+  may be overwritten (all labels, background only, or one named label) and
+  drives the segment editor's masking. Then Paint, Erase and GTReview's own
+  Sphere threshold (click the centre, drag to pull a sphere; tick **2D** to keep
+  only the slice you drew on). "New lesion" paints a fresh component with the
+  active label. Plus Undo, Redo and Reset-to-loaded. Only labels 1 and 2 exist
   and nothing in the UI can add another. Editing is locked until a lesion is
-  selected (or New lesion is active). There is one single undo stack: custom
-  operations are applied through the segment editor's modify-selected-segment
-  path so they land on the same stack as brush strokes.
+  selected (or New lesion is active).
+- **Painting is immediate and undo is per stroke** — Slicer's delayed paint is
+  off, so the segmentation follows the cursor instead of leaving outlined
+  circles until the mouse comes up. Slicer saves an undo state per brush stamp
+  rather than per stroke, so GTReview fingerprints the mask at mouse-down and
+  one Undo press walks back to where the stroke began. Every other edit
+  (lesion delete, label delete, a threshold apply) records a mark of its own, so
+  one press is always one operation. There is a single undo stack: custom
+  operations go through the segment editor's modify-selected-segment path so
+  they land on the same stack as brush strokes.
+- **Delete review** — next to the mask-source picker, enabled only when the case
+  has a saved `reviewed_seg`. It removes that file from disk and reopens the
+  case from its original mask; unlike everything else in the panel, `Ctrl+Z`
+  does not reach it, so it names the file and asks first.
 - **Save** — `Save & next case` at the bottom of the Editing section writes the reviewed mask and opens the next case; `Ctrl+S` saves without moving on. Both stay disabled until every lesion in the list is ticked *Done*.
 - **Keyboard shortcuts** for the whole review loop (see below).
 
@@ -200,7 +225,6 @@ while a text field has focus, so typing in a line edit never triggers them.
 | `p` | Previous case |
 | `Ctrl+S` | Save the reviewed mask |
 | `j` | Jump all slice views to the selected lesion |
-| `f` | Flip the selected lesion's label (1 ↔ 2) |
 | `1` / `2` | Paint / erase (needs a selected lesion or an active "New lesion") |
 | `3` | Sphere threshold: click a lesion's centre, drag to pull the sphere |
 | `Esc` | Stop editing / cancel "New lesion" |
@@ -220,7 +244,10 @@ module and restored on exit.
 
 ## Running the tests
 
-The pure-logic tests are plain `unittest` and need no Slicer application:
+The pure-logic tests are plain `unittest` and need no Slicer application. They
+import only the standard library and numpy — `slicer`, `vtk`, `qt` and `ctk`
+exist solely inside a running Slicer, so anything `discover` picks up must stay
+clear of them:
 
 ```bash
 /home/melandur/Documents/Slicer-5.10.0-linux-amd64/bin/PythonSlicer \
@@ -237,6 +264,19 @@ re-read it:
 ```bash
 /home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer --no-main-window \
     --python-script /home/melandur/code/gt_tools_slicer/Testing/smoke_headless.py
+```
+
+The integration test drives the module itself: it builds a synthetic case in a
+temp directory, then loads it, paints with real mouse events on a slice view,
+checks that one Undo press reverts the whole stroke, that Sphere threshold with
+**2D** ticked stays inside the drawn slice, and that the per-row lesion delete
+and *Delete review* behave. It needs the module on the path, and is named
+without a `test_` prefix so the `discover` run above leaves it alone:
+
+```bash
+/home/melandur/Documents/Slicer-5.10.0-linux-amd64/Slicer --no-splash \
+    --additional-module-path /home/melandur/code/gt_tools_slicer/GTReview \
+    --python-script /home/melandur/code/gt_tools_slicer/Testing/integration_gtreview.py
 ```
 
 The in-application self test (`GTReviewTest`) is reachable from the module's

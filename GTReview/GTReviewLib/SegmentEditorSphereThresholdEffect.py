@@ -81,6 +81,9 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.seedIjk = None  # absolute image ijk (extent-aware)
         self.seedValue = None
         self.radiusMm = 0.0
+        #: image axis the drag's slice view cuts across, captured at mouse-down
+        #: because the apply happens after the drag state has been torn down
+        self.flatAxis = None
         self._imageCache = None  # (image object, array_kji, extent)
         self.readoutLabel = None
         self.twoDCheckBox = None
@@ -208,6 +211,7 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
 
     # ------------------------------------------------------------ lifecycle
     def activate(self):
+        self.flatAxis = None
         self._imageCache = None
         self._setReadout("Click the centre of a lesion, then drag.")
 
@@ -261,6 +265,7 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
             return False
         self.dragging = True
         self.dragWidget = viewWidget
+        self.flatAxis = self._flatAxis()
         self.seedRas = list(ras)
         self.seedIjk = tuple(int(v) for v in ijk)
         self.seedValue = float(value)
@@ -389,8 +394,15 @@ class SegmentEditorSphereThresholdEffect(AbstractScriptedSegmentEditorEffect):
         return int(max(range(3), key=lambda axis: components[axis]))
 
     def _flattenToSeedSlice(self, box, mask, seedIjk, extent):
-        """Keep only the plane of *mask* that holds the seed."""
-        axis = self._flatAxis()
+        """Keep only the plane of *mask* that holds the seed.
+
+        The axis is the one captured at mouse-down: _finishDrag tears the drag
+        state down before it applies, so asking the (now cleared) drag widget
+        here would answer None and quietly hand back the whole ball.
+        """
+        axis = self.flatAxis
+        if axis is None:
+            axis = self._flatAxis()
         if axis is None:
             return mask  # drawn somewhere with no slice plane: leave the ball
         plane = int(seedIjk[axis]) - extent[2 * axis] - (box[axis].start or 0)
