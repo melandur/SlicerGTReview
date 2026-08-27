@@ -1,0 +1,681 @@
+<title>GTReview Panel Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* Light palette lives on bare :root so the un-stamped (system) state resolves. */
+  :root {
+    --ground:      #f6f8fa;
+    --surface:     #ffffff;
+    --surface-sunk:#eef1f6;
+    --ink:         #151a22;
+    --ink-soft:    #454f5e;
+    --ink-mute:    #6b7686;
+    --rule:        #dde2ea;
+
+    /* The four accents are the module's own section colours, not decoration:
+       each one matches the tint on that section's header inside Slicer. */
+    --dataset:  #2f7fd0;
+    --display:  #2f9f6f;
+    --lesions:  #b0742a;
+    --editing:  #8a5fd0;
+
+    --label-1: #d92b2b;
+    --label-2: #2f9c3b;
+
+    --warn-bg: #fdf3e7;
+    --warn-ru: #e0a561;
+
+    --shadow: 0 1px 2px rgba(21, 26, 34, .05), 0 8px 24px -16px rgba(21, 26, 34, .28);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #101319;
+      --surface:     #181c24;
+      --surface-sunk:#13171e;
+      --ink:         #e7ebf2;
+      --ink-soft:    #b3bcca;
+      --ink-mute:    #8d97a6;
+      --rule:        #2a313c;
+
+      --dataset:  #6aa9e8;
+      --display:  #58c496;
+      --lesions:  #dda85f;
+      --editing:  #ad8ce6;
+
+      --label-1: #f26a6a;
+      --label-2: #62c96f;
+
+      --warn-bg: #231d13;
+      --warn-ru: #8a6a3b;
+
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -18px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #101319;
+    --surface:     #181c24;
+    --surface-sunk:#13171e;
+    --ink:         #e7ebf2;
+    --ink-soft:    #b3bcca;
+    --ink-mute:    #8d97a6;
+    --rule:        #2a313c;
+
+    --dataset:  #6aa9e8;
+    --display:  #58c496;
+    --lesions:  #dda85f;
+    --editing:  #ad8ce6;
+
+    --label-1: #f26a6a;
+    --label-2: #62c96f;
+
+    --warn-bg: #231d13;
+    --warn-ru: #8a6a3b;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -18px rgba(0, 0, 0, .8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: clamp(2rem, 5vw, 4.5rem) clamp(1.1rem, 4vw, 2.5rem) 5rem;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: clamp(2rem, 4vw, 3.5rem);
+  }
+
+  @media (min-width: 60rem) {
+    .page { grid-template-columns: 13.5rem minmax(0, 1fr); align-items: start; }
+  }
+
+  /* ---------------------------------------------------------------- masthead */
+  .masthead { grid-column: 1 / -1; border-bottom: 1px solid var(--rule); padding-bottom: 2rem; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .72rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-mute);
+    margin: 0 0 .9rem;
+  }
+
+  h1 {
+    font-family: Newsreader, Georgia, "Times New Roman", serif;
+    font-weight: 500;
+    font-size: clamp(2.1rem, 5.5vw, 3.1rem);
+    line-height: 1.08;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0 0 .8rem;
+  }
+
+  .standfirst {
+    font-size: 1.06rem;
+    color: var(--ink-soft);
+    max-width: 60ch;
+    margin: 0;
+  }
+
+  .standfirst strong { color: var(--ink); font-weight: 500; }
+
+  /* -------------------------------------------------------------------- rail */
+  .rail { position: sticky; top: 2rem; font-size: .92rem; }
+  .rail-title {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .68rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--ink-mute); margin: 0 0 .85rem;
+  }
+  .rail ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .1rem; }
+  .rail a {
+    display: flex; align-items: baseline; gap: .6rem;
+    padding: .4rem .55rem; border-radius: 4px;
+    color: var(--ink-soft); text-decoration: none;
+    border-left: 3px solid transparent;
+  }
+  .rail a:hover, .rail a:focus-visible { background: var(--surface); color: var(--ink); }
+  .rail a:focus-visible { outline: 2px solid var(--dataset); outline-offset: 1px; }
+  .rail .chip { width: .6rem; height: .6rem; border-radius: 2px; flex: none; }
+  .rail .note { display: block; color: var(--ink-mute); font-size: .8rem; line-height: 1.35; }
+  @media (max-width: 59.99rem) { .rail { display: none; } }
+
+  /* ----------------------------------------------------------------- content */
+  .content { min-width: 0; display: flex; flex-direction: column; gap: 3.2rem; }
+
+  section { scroll-margin-top: 2rem; }
+
+  .sec-head { display: flex; align-items: center; gap: .8rem; margin-bottom: .35rem; }
+  .sec-swatch { width: 1.05rem; height: 1.05rem; border-radius: 3px; flex: none; }
+  h2 {
+    font-family: Newsreader, Georgia, serif;
+    font-weight: 500; font-size: 1.85rem; line-height: 1.15;
+    letter-spacing: -.01em; margin: 0; text-wrap: balance;
+  }
+  .sec-sub { color: var(--ink-mute); margin: 0 0 1.5rem; font-size: .97rem; max-width: 62ch; }
+
+  h3 {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-size: .78rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-mute); margin: 2.2rem 0 .8rem;
+  }
+
+  p { max-width: 66ch; }
+
+  /* ---------------------------------------------------------- control tables */
+  .controls { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--rule); }
+
+  .ctl {
+    display: grid; gap: .15rem .0rem;
+    grid-template-columns: 1fr;
+    padding: .95rem 0 .95rem 1rem;
+    border-bottom: 1px solid var(--rule);
+    border-left: 3px solid var(--accent, var(--rule));
+  }
+  @media (min-width: 42rem) {
+    .ctl { grid-template-columns: 15rem minmax(0, 1fr); gap: 0 1.6rem; padding-left: 1.1rem; }
+  }
+
+  .ctl-name {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .88rem; font-weight: 500; color: var(--ink);
+    line-height: 1.5;
+  }
+  .ctl-name .kind {
+    display: block; font-family: "IBM Plex Sans", sans-serif;
+    font-size: .72rem; font-weight: 400; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-mute); margin-top: .12rem;
+  }
+  .ctl-body { color: var(--ink-soft); font-size: .96rem; }
+  .ctl-body p { margin: 0 0 .5rem; max-width: 62ch; }
+  .ctl-body p:last-child { margin-bottom: 0; }
+  .ctl-body ul { margin: .35rem 0 0; padding-left: 1.05rem; }
+  .ctl-body li { margin-bottom: .28rem; }
+
+  code, .k {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .87em;
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: .08em .34em;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+
+  .swatch-inline {
+    display: inline-block; width: .68em; height: .68em; border-radius: 2px;
+    vertical-align: baseline; margin-right: .28em;
+  }
+
+  /* --------------------------------------------------------------- callouts */
+  .note-box {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-ru);
+    border-left-width: 3px;
+    border-radius: 4px;
+    padding: .9rem 1.1rem;
+    margin: 1.4rem 0 0;
+    font-size: .94rem;
+    color: var(--ink-soft);
+  }
+  .note-box strong { color: var(--ink); font-weight: 600; }
+  .note-box p { margin: 0; max-width: 66ch; }
+  .note-box p + p { margin-top: .5rem; }
+
+  /* ------------------------------------------------------------------ tables */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 5px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+  th, td { text-align: left; padding: .58rem .85rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-size: .72rem; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--ink-mute); font-weight: 600;
+    background: var(--surface-sunk);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; }
+  td.key { font-family: "IBM Plex Mono", ui-monospace, monospace; white-space: nowrap; font-size: .87rem; }
+
+  /* --------------------------------------------------------------- the loop */
+  .loop { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 1.6rem 1.7rem; box-shadow: var(--shadow); }
+  .loop ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: .55rem; color: var(--ink-soft); }
+  .loop li strong { color: var(--ink); font-weight: 600; }
+
+  footer {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem; margin-top: 1rem;
+    color: var(--ink-mute); font-size: .87rem;
+  }
+  footer p { max-width: 70ch; margin: 0 0 .4rem; }
+
+  a { color: inherit; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <p class="eyebrow">GTReview · 3D Slicer extension</p>
+    <h1>What every control in the panel does</h1>
+    <p class="standfirst">The module panel has four sections, and you work down them in order:
+      <strong>Dataset</strong> picks the case, <strong>Display</strong> sets up what you see,
+      <strong>Lesions</strong> lists what there is to check, <strong>Editing</strong> changes it.
+      Each control below is named exactly as it appears on screen.</p>
+  </header>
+
+  <nav class="rail" aria-label="Panel sections">
+    <p class="rail-title">The panel, top to bottom</p>
+    <ol>
+      <li><a href="#dataset"><span class="chip" style="background: var(--dataset)"></span>
+        <span>Dataset<span class="note">which case</span></span></a></li>
+      <li><a href="#display"><span class="chip" style="background: var(--display)"></span>
+        <span>Display<span class="note">what you see</span></span></a></li>
+      <li><a href="#lesions"><span class="chip" style="background: var(--lesions)"></span>
+        <span>Lesions<span class="note">what to check</span></span></a></li>
+      <li><a href="#editing"><span class="chip" style="background: var(--editing)"></span>
+        <span>Editing<span class="note">what you change</span></span></a></li>
+      <li><a href="#loop"><span class="chip" style="background: var(--ink-mute)"></span>
+        <span>The loop<span class="note">and shortcuts</span></span></a></li>
+    </ol>
+  </nav>
+
+  <main class="content">
+
+    <!-- ============================================================ DATASET -->
+    <section id="dataset" style="--accent: var(--dataset)">
+      <div class="sec-head">
+        <span class="sec-swatch" style="background: var(--dataset)"></span>
+        <h2>Dataset</h2>
+      </div>
+      <p class="sec-sub">Points the tool at a batch of cases and decides which mask you are correcting.
+        Nothing here writes to disk except <em>Delete review</em>.</p>
+
+      <div class="controls">
+        <div class="ctl">
+          <div class="ctl-name">Batch directory<span class="kind">path + Browse &amp; load…</span></div>
+          <div class="ctl-body">
+            <p>The folder that <em>contains</em> the case folders — one level deep, so point at
+              <code>batch_01</code>, not at its parent and not at a single case.</p>
+            <p>The dropdown remembers the last ten batch directories you opened.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Case<span class="kind">&lt; Prev · dropdown · Next &gt; · 1 / 50</span></div>
+          <div class="ctl-body">
+            <p>Moves between cases. A <strong>✓</strong> after a case name means a review has already
+              been saved for it. The counter on the right is your position in the filtered list.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Skip already reviewed cases<span class="kind">checkbox</span></div>
+          <div class="ctl-body">
+            <p>Hides every case that already has a saved review, so <em>Next</em> walks only the
+              work that is left.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Mask source<span class="kind">dropdown</span></div>
+          <div class="ctl-body">
+            <p>Which mask of this case you are reviewing — typically <code>seg</code>, or
+              <code>pred_seg</code> where there is no ground truth yet. If a review was saved
+              earlier it is offered here too, so you can pick up where you left off.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Delete review<span class="kind">button</span></div>
+          <div class="ctl-body">
+            <p>Removes this case's <code>&lt;case&gt;_reviewed_seg.nii.gz</code> from disk and reopens
+              the case from its original mask. Greyed out when there is no saved review.</p>
+            <div class="note-box">
+              <p><strong>This is the one control undo cannot reach.</strong> It deletes a file. It
+                names the file and asks first, and any unsaved edits in the editor go with it.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">The file list<span class="kind">read-only</span></div>
+          <div class="ctl-body">
+            <p>Under the controls, the case's files with their short keys —
+              <code>t1c</code>, <code>pred_seg</code>, <code>seg</code>. The dot marks the one
+              currently loaded. The greyed path below is the case folder.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ DISPLAY -->
+    <section id="display" style="--accent: var(--display)">
+      <div class="sec-head">
+        <span class="sec-swatch" style="background: var(--display)"></span>
+        <h2>Display</h2>
+      </div>
+      <p class="sec-sub">Everything here changes only what reaches your eyes. No control in this
+        section can alter a voxel.</p>
+
+      <div class="controls">
+        <div class="ctl">
+          <div class="ctl-name">Image<span class="kind">dropdown</span></div>
+          <div class="ctl-body">
+            <p>Which sequence sits underneath the mask. Also the image the intensity-based tools
+              read, so switching it changes what <em>Sphere threshold</em> measures.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Compare with · Blend<span class="kind">dropdown + slider</span></div>
+          <div class="ctl-body">
+            <p>A second sequence faded over the first — <code>t1c</code> over <code>flair</code>,
+              say. Both rows stay hidden for a case with only one sequence, which is most of them.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Contrast<span class="kind">window / level</span></div>
+          <div class="ctl-body">
+            <p>Brightness and contrast of the image. <em>Auto</em> follows the volume;
+              <em>Manual</em> lets you drag the range or type <code>W</code> and <code>L</code>.
+              The <code>…</code> button holds the modality presets.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Layout<span class="kind">dropdown</span></div>
+          <div class="ctl-body">
+            <p>Four-Up, 1×1 Red (axial), 1×1 Yellow (sagittal), 1×1 Green (coronal), 2×2 slices,
+              or Conventional. One slice filling the window is usually the fastest way to paint.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Slices: align to the image grid<span class="kind">checkbox · on by default</span></div>
+          <div class="ctl-body">
+            <p>Rotates the slice views onto the mask's own voxel axes.</p>
+            <p>In this data the mask sits a median <strong>8.3°</strong> off the anatomical axes, so
+              the ordinary axial/coronal/sagittal planes cut the voxel grid diagonally — and a
+              stroke you draw as a clean disc is committed as a stair-stepped one. Untick it when
+              you want true anatomical orientation to judge anatomy.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Mask: show + slider<span class="kind">checkbox + opacity</span></div>
+          <div class="ctl-body">
+            <p>Hides the mask or fades it, so you can see the underlying tissue you are deciding
+              about. On the keyboard: <span class="k">s</span> hides and shows,
+              <span class="k">a</span> and <span class="k">d</span> step the fill 10% either way.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Reset field of view<span class="kind">button</span></div>
+          <div class="ctl-body">
+            <p>Re-centres and re-fits every slice view on the volume. The same thing
+              <span class="k">r</span> does with the pointer over a view.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ LESIONS -->
+    <section id="lesions" style="--accent: var(--lesions)">
+      <div class="sec-head">
+        <span class="sec-swatch" style="background: var(--lesions)"></span>
+        <h2>Lesions</h2>
+      </div>
+      <p class="sec-sub">Every connected component of the current mask, recomputed as you edit.
+        This list is your worklist: the case is not finished until each row is ticked.</p>
+
+      <div class="controls">
+        <div class="ctl">
+          <div class="ctl-name">New lesion<span class="kind">toggle button</span></div>
+          <div class="ctl-body">
+            <p>Arms the brush over empty mask. Paint anywhere nothing is labelled and the stroke
+              becomes its own row once the list refreshes. It uses whatever
+              <em>Active label</em> is set to. <span class="k">Esc</span> cancels.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">#<span class="kind">column</span></div>
+          <div class="ctl-body">
+            <p>A rank by size — <strong>not a name</strong>. Numbers are handed out afresh on every
+              recount, so a lesion's <code>#</code> changes when another lesion is painted, deleted,
+              or grows past it. Your <em>Done</em> ticks are tracked by position in the volume, not
+              by number, so they survive the renumbering.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Voxels · Volume (mm3)<span class="kind">columns</span></div>
+          <div class="ctl-body">
+            <p>Size of the component, in voxels and in physical volume. Click either heading to
+              sort; the list opens sorted by size, largest first.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Done<span class="kind">checkbox column</span></div>
+          <div class="ctl-body">
+            <p>Your record that you have looked at this lesion and are happy with it.
+              <em>Save &amp; next case</em> stays disabled until every row is ticked.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">🗑<span class="kind">per-row button</span></div>
+          <div class="ctl-body">
+            <p>Deletes that whole lesion — every one of its voxels, from both labels. It asks
+              first, naming the voxel count, and it is undoable with
+              <span class="k">Ctrl+Z</span>. Nothing is written to disk until you save.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Selecting a row<span class="kind">behaviour</span></div>
+          <div class="ctl-body">
+            <p>Jumps every slice view to that lesion's centre and briefly flashes it, so you can
+              tell which of several nearby components you have. The centre is snapped to a voxel
+              that is genuinely inside the lesion, so it never lands in a hole.</p>
+            <p>Selecting a row is also what <strong>unlocks the brush</strong> — see Editing.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">The summary line<span class="kind">read-only</span></div>
+          <div class="ctl-body">
+            <p><code>3 lesions | 4059 voxels | 4059.0 mm3 | 0/3 done</code> — the whole case at a
+              glance. The done count turns green when the case is ready to save.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ EDITING -->
+    <section id="editing" style="--accent: var(--editing)">
+      <div class="sec-head">
+        <span class="sec-swatch" style="background: var(--editing)"></span>
+        <h2>Editing</h2>
+      </div>
+      <p class="sec-sub">Two questions before any tool: which label goes down, and what it is
+        allowed to paint over. Then the tool itself.</p>
+
+      <div class="controls">
+        <div class="ctl">
+          <div class="ctl-name">Undo · Redo · Reset<span class="kind">buttons</span></div>
+          <div class="ctl-body">
+            <p>One press is one operation — a whole brush stroke, a lesion delete, a threshold
+              apply. <em>Reset</em> is different: it reloads the mask from disk and discards
+              everything since your last save.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Active label<span class="kind">dropdown</span></div>
+          <div class="ctl-body">
+            <p>What the brush lays down:</p>
+            <ul>
+              <li><span class="swatch-inline" style="background: var(--label-1)"></span><code>1 - Necrosis and Cavity</code></li>
+              <li><span class="swatch-inline" style="background: var(--label-2)"></span><code>2 - Enhancing Tumor</code></li>
+              <li><code>Background (erase)</code> — painting background <em>is</em> erasing, so
+                choosing it arms the Erase tool.</li>
+            </ul>
+            <p>It follows the lesion you select, and picking a tool with the digit keys sets it
+              back to that lesion's label.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Paint over<span class="kind">dropdown</span></div>
+          <div class="ctl-body">
+            <p>Which voxels the brush may change:</p>
+            <ul>
+              <li><code>All labels</code> — overwrite anything.</li>
+              <li><code>Background only</code> — never touch a voxel that already has a label,
+                so you can fill a gap without eating its neighbour.</li>
+              <li><code>Only 1 - …</code> / <code>Only 2 - …</code> — only that label may be
+                painted over.</li>
+            </ul>
+            <p>It applies to all three tools, threshold included.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">None · Paint · Erase · Sphere threshold<span class="kind">tool row</span></div>
+          <div class="ctl-body">
+            <p>The tools, on <span class="k">1</span> <span class="k">2</span>
+              <span class="k">3</span>. Each one's settings appear directly underneath.</p>
+            <p>Painting applies as the cursor moves rather than waiting for the mouse button, so
+              what you see under the brush is what is committed.</p>
+            <div class="note-box">
+              <p><strong>The brush is locked until a lesion is selected</strong>, or until
+                <em>New lesion</em> is armed. That is deliberate: it stops a stray click landing
+                somewhere nobody is reviewing.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Sphere threshold<span class="kind">tool</span></div>
+          <div class="ctl-body">
+            <p>Click the centre of a lesion and drag outward. A circle follows the pointer; release,
+              and every voxel inside the sphere whose intensity is close to the one you clicked is
+              added — in one undo step.</p>
+            <ul>
+              <li><code>Tolerance</code> — how far an intensity may deviate from the clicked
+                voxel, as a percentage of it.</li>
+              <li><code>Include</code> — similar to the seed, or additionally everything
+                brighter / darker than it.</li>
+              <li><code>Only voxels connected to the seed</code> — leaves unrelated bright spots
+                inside the sphere alone.</li>
+              <li><code>2D: this slice only</code> — a disc on the slice you drew on instead of a
+                ball through the ones you are not looking at. Use it when a lesion is only
+                convincing on one slice.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Save &amp; next case<span class="kind">button</span></div>
+          <div class="ctl-body">
+            <p>Writes <code>&lt;case&gt;_reviewed_seg.nii.gz</code> next to the case and opens the
+              next one. <span class="k">Ctrl+S</span> saves without moving on.</p>
+            <p>Disabled until every lesion is ticked <em>Done</em> — hover it and the tooltip says
+              how many are left. <strong>The original mask is never modified;</strong> the review
+              is always a new file.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =============================================================== LOOP -->
+    <section id="loop">
+      <div class="sec-head">
+        <span class="sec-swatch" style="background: var(--ink-mute)"></span>
+        <h2>The loop, and the keys</h2>
+      </div>
+      <p class="sec-sub">What a case actually looks like from open to save.</p>
+
+      <div class="loop">
+        <ol>
+          <li><strong>Open the batch</strong> once — <em>Browse &amp; load…</em>, then tick
+            <em>Skip already reviewed cases</em>.</li>
+          <li><strong>Take the first lesion</strong> from the list. The views jump to it.</li>
+          <li><strong>Look before you touch.</strong> <span class="k">s</span> hides the mask,
+            <span class="k">a</span> and <span class="k">d</span> fade it — decide whether the
+            boundary is right against the image, not against the overlay.</li>
+          <li><strong>Correct it</strong> if it needs it: paint, erase, or pull a threshold sphere.
+            <span class="k">Ctrl+Z</span> takes back whole operations.</li>
+          <li><strong>Tick it Done</strong> and move to the next row.</li>
+          <li><strong>Save &amp; next case</strong> once every row is ticked.</li>
+        </ol>
+      </div>
+
+      <h3>Keys, while the module is open</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Key</th><th scope="col">Does</th></tr></thead>
+          <tbody>
+            <tr><td class="key">1 / 2 / 3</td><td>paint / erase / sphere threshold</td></tr>
+            <tr><td class="key">a / s / d</td><td>mask fainter / hide / stronger</td></tr>
+            <tr><td class="key">Del</td><td>delete the selected lesion</td></tr>
+            <tr><td class="key">Ctrl+Z / Ctrl+Y</td><td>undo / redo (<code>Ctrl+Shift+Z</code> also redoes)</td></tr>
+            <tr><td class="key">Ctrl+S</td><td>save without moving on</td></tr>
+            <tr><td class="key">Esc</td><td>stop editing, cancel New lesion</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Moving around a slice view — Slicer's own</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Gesture</th><th scope="col">Does</th></tr></thead>
+          <tbody>
+            <tr><td class="key">wheel</td><td>slice through the volume</td></tr>
+            <tr><td class="key">right-drag</td><td>zoom</td></tr>
+            <tr><td class="key">Ctrl+wheel</td><td>zoom</td></tr>
+            <tr><td class="key">middle-drag</td><td>move the image</td></tr>
+            <tr><td class="key">Shift+drag</td><td>move the image</td></tr>
+            <tr><td class="key">r</td><td>reset zoom and centre</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top: .9rem; color: var(--ink-mute); font-size: .92rem;">
+        These six are also pinned at the foot of the module panel, so you never have to leave
+        Slicer to look them up.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>GTReview is a scripted 3D Slicer extension. It reads your ground-truth masks and writes its
+      output as a separate <code>_reviewed_seg.nii.gz</code> beside each case — the files you point
+      it at are never modified.</p>
+    <p>Labels: <span class="swatch-inline" style="background: var(--label-1)"></span>1 Necrosis and
+      Cavity · <span class="swatch-inline" style="background: var(--label-2)"></span>2 Enhancing
+      Tumor. No other label exists, and nothing in the panel can add one.</p>
+  </footer>
+</div>

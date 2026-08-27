@@ -15,6 +15,13 @@ and write the result to a new `_reviewed_seg.nii.gz` beside the source data.
 
 ---
 
+## Guide for reviewers
+
+`Docs/panel-guide.html` walks through every control in the panel, section by
+section, in the order you meet them. Open it in a browser and keep it beside
+Slicer; it is a single self-contained file, so it works from a file:// path or
+from a share.
+
 ## Features
 
 - **Dataset browser** — pick a batch directory, all cases are discovered
