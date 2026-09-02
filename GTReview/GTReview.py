@@ -1037,6 +1037,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # after the stretch, so it is pinned to the bottom of the panel rather
         # than following the sections up
         self._buildShortcutsFooter()
+        # Qt's stylesheet engine clears autoFillBackground when it polishes a
+        # widget at first show, so the section fills are put back once the
+        # panel is on screen (and again on every enter, see enter()).
+        self._sections = [
+            widget for widget in self.parent.findChildren(ctk.ctkCollapsibleButton)
+            if widget.objectName.startswith("GTReviewSection")
+        ]
+        qt.QTimer.singleShot(0, self._reassertSectionFills)
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
@@ -1791,7 +1799,13 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     # -- save ---------------------------------------------------------------- #
     # --------------------------------------------------------- enter/exit/close
+    def _reassertSectionFills(self):
+        for section in getattr(self, "_sections", []):
+            if not section.autoFillBackground:
+                section.setAutoFillBackground(True)
+
     def enter(self):
+        self._reassertSectionFills()
         if self.editor is not None:
             # The editor's own shortcuts are deliberately NOT installed: its
             # Ctrl+Z / Ctrl+Shift+Z duplicate ours (Qt then fires neither) and
@@ -2383,7 +2397,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     ACCENT_EDITING = "#8a5fd0"    # purple - what you change
 
     def _accentSection(self, section, color, name):
-        """Tint a collapsible section header with its accent colour.
+        """Tint a collapsible section, header and body, with its accent colour.
 
         Styled through an object-name selector so the rule cannot leak into the
         section's children (the Segment Editor has collapsibles of its own).
@@ -2391,18 +2405,30 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         objectName = "GTReviewSection{}".format(name)
         section.setObjectName(objectName)
         if self._isDarkTheme():
-            fill = self._blend(color, "#000000", 0.70)
+            fill = self._blend(color, "#000000", 0.78)
             text = self._blend(color, "#ffffff", 0.62)
         else:
-            fill = self._blend(color, "#ffffff", 0.80)
+            fill = self._blend(color, "#ffffff", 0.88)
             text = self._blend(color, "#000000", 0.50)
+        # The fill goes through the palette, not the stylesheet: a stylesheet
+        # background makes Qt switch autoFillBackground off and paint the
+        # background itself, which it only does for plain widgets -- the
+        # collapsible button paints its own header and leaves the body on the
+        # parent's grey.  A palette fill with autoFillBackground covers the
+        # whole section, header and body, on screen.  Faint, so the controls
+        # inside stay crisp.
         section.setStyleSheet(
-            "#{name} {{ background-color: {fill}; color: {text};"
+            "#{name} {{ color: {text};"
             " border: 1px solid {c}; border-left: 5px solid {c};"
             " border-radius: 3px; font-weight: bold; padding: 2px; }}".format(
-                name=objectName, fill=fill, text=text, c=color
+                name=objectName, text=text, c=color
             )
         )
+        palette = section.palette
+        for role in (qt.QPalette.Window, qt.QPalette.Button, qt.QPalette.Base):
+            palette.setColor(role, qt.QColor(fill))
+        section.setPalette(palette)
+        section.setAutoFillBackground(True)
         return section
 
     @staticmethod
