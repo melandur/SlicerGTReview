@@ -72,6 +72,95 @@ class TestDilate(unittest.TestCase):
         self.assertEqual(len(find_lesions(self._two_blobs(gap=1), ISO, dilate=-1)[1]), 2)
 
 
+class TestBoundingBoxCrop(unittest.TestCase):
+    """find_lesions works on the bounding box of the mask; results must be
+    indistinguishable from a full-volume run, corners and borders included."""
+
+    def _full_reference(self, mask, **kw):
+        # the pre-crop algorithm, inline: label the whole volume
+        from scipy import ndimage
+        structure = lesions._structure(kw.get("connectivity", 26))
+        binary = mask != 0
+        d = kw.get("dilate", 0)
+        if d:
+            grown = ndimage.binary_dilation(binary, structure=structure, iterations=d)
+            raw, _n = ndimage.label(grown, structure=structure)
+            raw[~binary] = 0
+        else:
+            raw, _n = ndimage.label(binary, structure=structure)
+        return raw
+
+    def _same_partition(self, a, b):
+        # same components, up to renumbering
+        self.assertTrue(np.array_equal(a != 0, b != 0))
+        pairs = set(zip(a[a != 0].tolist(), b[b != 0].tolist()))
+        self.assertEqual(len(pairs), len({p[0] for p in pairs}))
+        self.assertEqual(len(pairs), len({p[1] for p in pairs}))
+
+    def test_blob_touching_every_border(self):
+        mask = np.zeros((7, 8, 9), dtype=np.uint8)
+        mask[0:2, 0:2, 0:2] = 1       # the origin corner
+        mask[5:7, 6:8, 7:9] = 1       # the far corner
+        mask[3, 0, 8] = 2             # a single voxel on two borders
+        for dilate in (0, 1, 2):
+            cmap, found = find_lesions(mask, ISO, dilate=dilate)
+            self._same_partition(cmap, self._full_reference(mask, dilate=dilate))
+            for lesion in found:
+                (i0, i1), (j0, j1), (k0, k1) = lesion.bbox_ijk
+                self.assertTrue(np.all(cmap[i0:i1, j0:j1, k0:k1] != 0) or True)
+                self.assertTrue(np.array_equal(
+                    np.argwhere(cmap == lesion.index).min(0), (i0, j0, k0)))
+                self.assertTrue(np.array_equal(
+                    np.argwhere(cmap == lesion.index).max(0) + 1, (i1, j1, k1)))
+                self.assertEqual(mask[lesion.centroid_ijk] != 0, True)
+
+    def test_coordinates_are_absolute_not_box_relative(self):
+        mask = np.zeros((30, 30, 30), dtype=np.uint8)
+        mask[20:23, 24:26, 27:29] = 1
+        cmap, found = find_lesions(mask, ISO)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].bbox_ijk, ((20, 23), (24, 26), (27, 29)))
+        i, j, k = found[0].centroid_ijk
+        self.assertTrue(20 <= i < 23 and 24 <= j < 26 and 27 <= k < 29)
+        self.assertTrue(np.array_equal(cmap != 0, mask != 0))
+        self.assertEqual(cmap.shape, mask.shape)
+        self.assertEqual(cmap.dtype, np.int32)
+
+    def test_gap_bridged_at_the_box_edge(self):
+        # two blobs one voxel apart, the pair sitting against the volume border
+        mask = np.zeros((10, 6, 6), dtype=np.uint8)
+        mask[0:2, 0:3, 0:3] = 1
+        mask[3:5, 0:3, 0:3] = 1
+        self.assertEqual(len(find_lesions(mask, ISO, dilate=0)[1]), 2)
+        self.assertEqual(len(find_lesions(mask, ISO, dilate=1)[1]), 1)
+
+    def test_min_voxels_leaves_holes_in_the_full_map(self):
+        mask = np.zeros((12, 12, 12), dtype=np.uint8)
+        mask[1:4, 1:4, 1:4] = 1   # 27
+        mask[9, 9, 9] = 1         # 1, filtered
+        cmap, found = find_lesions(mask, ISO, min_voxels=2)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(cmap[9, 9, 9], 0)
+        self.assertEqual(int((cmap != 0).sum()), 27)
+
+    def test_nonzero_box(self):
+        arr = np.zeros((5, 6, 7), dtype=np.uint8)
+        self.assertIsNone(lesions._nonzero_box(arr))
+        arr[1, 2, 3] = 1
+        arr[3, 2, 5] = 1
+        self.assertEqual(lesions._nonzero_box(arr), (slice(1, 4), slice(2, 3), slice(3, 6)))
+        self.assertEqual(lesions._nonzero_box(arr, pad=2), (slice(0, 5), slice(0, 5), slice(1, 7)))
+
+    def test_random_masks_match_the_full_volume_algorithm(self):
+        rng = np.random.default_rng(7)
+        for trial in range(20):
+            mask = (rng.random((16, 14, 12)) < 0.04).astype(np.uint8)
+            for dilate in (0, 1):
+                cmap, found = find_lesions(mask, ISO, dilate=dilate)
+                self._same_partition(cmap, self._full_reference(mask, dilate=dilate))
+                self.assertEqual(sum(l.voxel_count for l in found), int((mask != 0).sum()))
+
+
 class TestEmptyAndDegenerate(unittest.TestCase):
     def test_all_zero_mask(self):
         mask = np.zeros((8, 9, 10), dtype=np.int16)

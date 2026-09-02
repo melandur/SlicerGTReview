@@ -473,6 +473,27 @@ class GTReviewIntegrationTest(unittest.TestCase):
                      "the mask at mouse-down was fingerprinted, once for the stroke",
                      "{} marks".format(len(widget._strokeStarts)))
 
+    def test_03b_live_fill_toggle(self):
+        CHECKS.step("Live fill: immediate brush by default, delayed when unticked")
+        widget = self.widget
+        effect = widget.editor.activeEffect()
+        CHECKS.check(effect is not None and effect.name == "Paint", "Paint is still active")
+        CHECKS.check(widget.liveFillCheckBox.checked, "Live fill is ticked by default")
+        CHECKS.check(not effect.delayedPaint, "so the brush commits stamp by stamp")
+        widget.liveFillCheckBox.checked = False
+        pump(0.1)
+        CHECKS.check(effect.delayedPaint, "unticking switches the effect to delayed paint")
+        widget.editor.setActiveEffectByName("Erase")
+        pump(0.1)
+        CHECKS.check(widget.editor.activeEffect().delayedPaint,
+                     "and a newly activated brush follows the box")
+        widget.liveFillCheckBox.checked = True
+        pump(0.1)
+        CHECKS.check(not widget.editor.activeEffect().delayedPaint,
+                     "ticking it again restores immediate paint")
+        widget.editor.setActiveEffectByName("Paint")
+        pump(0.1)
+
     def test_04_undo_the_whole_stroke(self):
         CHECKS.step("Undoing the stroke with one Undo press")
         widget = self.widget

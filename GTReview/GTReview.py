@@ -924,7 +924,9 @@ class GTReviewLogic(ScriptedLoadableModuleLogic):
 class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """The GUI."""
 
-    LESION_REFRESH_DEBOUNCE_MS = 1500
+    #: the recount is ~30 ms now that it runs on the mask's bounding box, so it
+    #: can follow the brush closely without getting in its way
+    LESION_REFRESH_DEBOUNCE_MS = 700
     #: the only effects offered in the brush grid
     EDITOR_EFFECTS = ("Paint", "Erase", SPHERE_THRESHOLD_EFFECT)
     #: brush is always absolute; lesions here are tiny (median 26 voxels)
@@ -981,6 +983,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._strokeStarts = []
         self._redoTargets = []
         self._strokeObservers = []
+        self._strokeInProgress = False
+        self.liveFillCheckBox = None
 
         self.cases = []
         self.filteredCases = []
@@ -1519,6 +1523,21 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
         self.paintOverComboBox.connect("activated(int)", self.onPaintOverChanged)
         labelForm.addRow("Paint over:", self.paintOverComboBox)
+
+        # Slicer commits an immediate brush stamp by stamp, ~15 ms each on a
+        # 240x240x155 case (measured; the cost is inside the paint effect, not
+        # in this module), so a long drag stutters.  Delayed paint draws the
+        # outlines and fills once on release, ~20 ms per stroke.
+        self.liveFillCheckBox = qt.QCheckBox("Live fill")
+        self.liveFillCheckBox.checked = True
+        self.liveFillCheckBox.toolTip = (
+            "Ticked: the mask fills under the brush as you drag, like ITK-SNAP, "
+            "at the cost of a small pause per stamp on big volumes.\n"
+            "Unticked: the drag draws outlines and the fill lands on release, "
+            "which is much faster and smoother."
+        )
+        self.liveFillCheckBox.connect("toggled(bool)", self.onLiveFillChanged)
+        labelForm.addRow("Brush:", self.liveFillCheckBox)
         box.addLayout(labelForm)
 
         self.editor = segmentationWidgets.qMRMLSegmentEditorWidget()
@@ -2731,6 +2750,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 vtk.vtkCommand.LeftButtonPressEvent, self._onStrokeStart, 100.0
             )
             self._strokeObservers.append((interactor, tag))
+            tag = interactor.AddObserver(
+                vtk.vtkCommand.LeftButtonReleaseEvent, self._onStrokeEnd, -100.0
+            )
+            self._strokeObservers.append((interactor, tag))
 
     def _onStrokeStart(self, caller=None, event=None):
         """Mouse-down in a slice view with any effect armed starts an edit.
@@ -2741,7 +2764,12 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         del caller, event
         if self.editor is None or self.editor.activeEffect() is None:
             return
+        self._strokeInProgress = True
         self._markEdit()
+
+    def _onStrokeEnd(self, caller=None, event=None):
+        del caller, event
+        self._strokeInProgress = False
 
     def _markEdit(self):
         """Remember the mask as it stands, so one Undo press steps over the
@@ -2924,20 +2952,30 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.removeObservers(method=self.onSegmentationModified)
 
     def onSegmentationModified(self, caller=None, event=None):
+        """A brush stroke raises this a few times per stamp, so it has to be
+        cheap: the case status (which stats every file of the case) is only
+        redrawn when the unsaved flag actually flips."""
         del caller, event
         if self.logic.segmentationNode is None:
             return
+        flipped = not self.unsavedChanges
         self.unsavedChanges = True
         self.setLesionsStale(True)
         if self._refreshTimer is not None and self.autoRefreshCheckBox.checked:
             self._refreshTimer.start(self.LESION_REFRESH_DEBOUNCE_MS)
-        self._updateCaseControls()
+        if flipped:
+            self._updateCaseControls()
 
     @guarded("Refreshing the lesion list")
     def onDebouncedRefresh(self):
         if not self.lesionsStale or self.logic.segmentationNode is None:
             return
         if not self.autoRefreshCheckBox.checked:
+            return
+        if self._strokeInProgress:
+            # never recount under a held mouse button: the refresh pumps
+            # events and repopulates the table mid-stroke
+            self._refreshTimer.start(self.LESION_REFRESH_DEBOUNCE_MS)
             return
         self.refreshLesions()
 
@@ -3980,10 +4018,18 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         effect = self.editor.activeEffect()
         if effect is None or not hasattr(effect, "setDelayedPaint"):
             return
+        live = self.liveFillCheckBox is None or bool(self.liveFillCheckBox.checked)
         try:
-            effect.setDelayedPaint(False)
+            effect.setDelayedPaint(not live)
         except Exception:  # noqa: BLE001 - effect without the property
             logging.debug("GTReview: setDelayedPaint unavailable", exc_info=True)
+
+    @guarded("Changing the brush mode")
+    def onLiveFillChanged(self, checked=None):
+        del checked
+        if self._updatingGui:
+            return
+        self._applyImmediatePaint()
 
     def _initialiseBrush(self):
         """A sensible absolute brush the first time a brush is activated."""
@@ -4093,21 +4139,49 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     MAX_STROKE_MARKS = 60
 
     def _maskFingerprint(self):
-        """Cheap content signature of the mask, to spot a no-op history step."""
+        """Cheap content signature of the mask, to spot a no-op history step.
+
+        Per segment: voxel count and the sum of the absolute i, j, k indices of
+        its voxels, so a stroke that moves voxels without changing their number
+        still reads as a change.  Read straight off the segment's own labelmap
+        (a few hundred thousand voxels around the lesions) rather than through
+        an export into the full reference geometry: under a millisecond against
+        50 ms, and Undo walks this once per history state.  Independent of the
+        labelmap's extent, which Slicer grows as painting reaches its edge.
+        """
         node = self.logic.segmentationNode if self.logic is not None else None
         if node is None:
             return None
+        segmentation = node.GetSegmentation()
+        representation = (
+            slicer.vtkSegmentationConverter.GetSegmentationBinaryLabelmapRepresentationName()
+        )
         signature = []
         for segmentId in self.logic.segmentIds():
             try:
-                array = slicer.util.arrayFromSegmentBinaryLabelmap(node, segmentId)
-            except Exception:  # noqa: BLE001 - segment without a labelmap yet
+                segment = segmentation.GetSegment(segmentId)
+                labelmap = segment.GetRepresentation(representation)
+                if labelmap is None or labelmap.GetPointData().GetScalars() is None:
+                    signature.append(None)
+                    continue
+                dims = labelmap.GetDimensions()
+                extent = labelmap.GetExtent()
+                flat = vtk_np.vtk_to_numpy(labelmap.GetPointData().GetScalars())
+                hits = np.flatnonzero(flat == int(segment.GetLabelValue()))
+                if hits.size == 0:
+                    signature.append((0, 0, 0, 0))
+                    continue
+                k, j, i = np.unravel_index(hits, (dims[2], dims[1], dims[0]))
+                n = int(hits.size)
+                signature.append((
+                    n,
+                    int(i.sum()) + n * int(extent[0]),
+                    int(j.sum()) + n * int(extent[2]),
+                    int(k.sum()) + n * int(extent[4]),
+                ))
+            except Exception:  # noqa: BLE001 - representation API differences
+                logging.debug("GTReview: fingerprinting %s failed", segmentId, exc_info=True)
                 signature.append(None)
-                continue
-            if array is None:
-                signature.append(None)
-            else:
-                signature.append((array.shape, int(np.count_nonzero(array))))
         return tuple(signature)
 
     def _stepHistory(self, step, target=None):

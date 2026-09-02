@@ -61,7 +61,10 @@ from a share.
   drives the segment editor's masking. Then Paint, Erase and GTReview's own
   Sphere threshold (click the centre, drag to pull a sphere; tick **2D** to keep
   only the slice you drew on). "New lesion" paints a fresh component with the
-  active label. Plus Undo, Redo and Reset-to-loaded. Only labels 1 (Necrosis
+  active label. `Brush: Live fill` (ticked) fills under the brush as you drag;
+  untick it for Slicer's delayed paint, which draws outlines and fills on
+  release and is far cheaper per stroke on large volumes. Plus Undo, Redo and
+  Reset-to-loaded. Only labels 1 (Necrosis
   and Cavity), 2 (Enhancing Tumor) and 3 (Edema) exist and nothing in the UI
   can add another. Editing is locked until a lesion is
   selected (or New lesion is active).

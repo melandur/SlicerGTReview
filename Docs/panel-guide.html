@@ -554,6 +554,18 @@
         </div>
 
         <div class="ctl">
+          <div class="ctl-name">Brush: Live fill<span class="kind">checkbox</span></div>
+          <div class="ctl-body">
+            <p>Ticked (default): the mask fills under the brush as you drag. Each stamp is
+              committed on its own, which costs a few milliseconds on a large volume, so a long
+              fast drag can feel stuttery.</p>
+            <p>Unticked: the drag only draws the brush outlines and the whole stroke is filled once
+              when you release. Much smoother; you just do not see the fill until the button comes
+              up. Undo treats a stroke as one step either way.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
           <div class="ctl-name">Paint over<span class="kind">dropdown</span></div>
           <div class="ctl-body">
             <p>Which voxels the brush may change:</p>
