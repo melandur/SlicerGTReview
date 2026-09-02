@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GTReview Tutorial</title>
+<style>
+  :root {
+    --ground: #f6f8fa; --surface: #ffffff; --ink: #151a22; --ink-soft: #454f5e;
+    --ink-mute: #6b7686; --rule: #dde2ea; --accent: #2f7fd0;
+    --dataset: #2f7fd0; --display: #2f9f6f; --lesions: #d98b2b; --editing: #8a5bd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground: #12161c; --surface: #1a2029; --ink: #e8ecf1; --ink-soft: #b8c0cc;
+            --ink-mute: #8a94a3; --rule: #2b3340; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink);
+         font: 16px/1.55 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .lede { color: var(--ink-soft); margin: 0 0 28px; font-size: 1.05rem; }
+  nav.toc { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 12px 16px; margin-bottom: 36px;
+            background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; }
+  nav.toc a { color: var(--accent); text-decoration: none; font-weight: 500; }
+  section { margin: 0 0 44px; }
+  h2 { font-size: 1.45rem; margin: 0 0 12px; padding-bottom: 6px; border-bottom: 2px solid var(--rule); }
+  h2 .step { display: inline-block; min-width: 30px; height: 30px; line-height: 30px; text-align: center;
+             border-radius: 15px; background: var(--accent); color: #fff; font-size: 0.95rem; margin-right: 10px; }
+  h3 { font-size: 1.1rem; margin: 22px 0 8px; }
+  h3.dataset { color: var(--dataset); } h3.display { color: var(--display); }
+  h3.lesions { color: var(--lesions); } h3.editing { color: var(--editing); }
+  p, li { color: var(--ink); }
+  ul { padding-left: 22px; margin: 6px 0 12px; }
+  li { margin: 4px 0; }
+  li b { font-weight: 600; }
+  code, kbd { font: 0.92em "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+  kbd { display: inline-block; min-width: 1.6em; text-align: center; background: var(--surface);
+        border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
+  figure { margin: 14px 0 18px; background: var(--surface); border: 1px solid var(--rule);
+           border-radius: 10px; padding: 10px; }
+  figure img { display: block; max-width: 100%; height: auto; border-radius: 6px; }
+  figure.small img { max-width: 520px; }
+  figcaption { color: var(--ink-mute); font-size: 0.9rem; margin-top: 8px; }
+  .note { border-left: 4px solid var(--accent); background: var(--surface); padding: 10px 14px;
+          border-radius: 0 8px 8px 0; margin: 12px 0; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  table.keys { border-collapse: collapse; margin: 8px 0 4px; }
+  table.keys td { padding: 4px 14px 4px 0; vertical-align: top; }
+  footer { color: var(--ink-mute); font-size: 0.9rem; border-top: 1px solid var(--rule); padding-top: 14px; }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>GTReview: install and first review</h1>
+  <p class="lede">From a fresh 3D Slicer to a saved review in four steps. Only what you need per box;
+    the full control-by-control reference is in the <a href="panel-guide.html">panel guide</a>.</p>
+
+  <nav class="toc">
+    <a href="#slicer">1 · Install 3D Slicer</a>
+    <a href="#plugin">2 · Install the plugin</a>
+    <a href="#open">3 · Open it</a>
+    <a href="#use">4 · Review a case</a>
+    <a href="#keys">Keys</a>
+  </nav>
+
+  <section id="slicer">
+    <h2><span class="step">1</span>Install 3D Slicer 5.10</h2>
+    <p>Download the <b>5.10.x</b> release for your platform from
+      <a href="https://download.slicer.org/">download.slicer.org</a> and install it like any other application.</p>
+    <div class="note">
+      The plugin package is built for <b>Slicer 5.10</b>. A different major.minor version (5.8, 5.11, …) will not
+      load it from the package, so check <i>Help → About 3D Slicer</i> if you already have Slicer installed.
+    </div>
+    <ul>
+      <li><b>Linux</b>: unpack the <code>.tar.gz</code> anywhere and run <code>Slicer</code> inside it.</li>
+      <li><b>Windows</b>: run the installer; Slicer lands under <code>AppData\Local\NA-MIC\Slicer 5.10.0</code>.</li>
+      <li><b>macOS</b>: drag <code>Slicer.app</code> to Applications.</li>
+    </ul>
+  </section>
+
+  <section id="plugin">
+    <h2><span class="step">2</span>Install the plugin</h2>
+    <p>Get the package from the repository's <code>Packages/</code> folder. It is one
+      <code>.tar.gz</code> whose name starts with the Slicer revision, for example
+      <code>34045-linux-amd64-GTReview-…tar.gz</code>. Pick the one for your platform.</p>
+    <ol>
+      <li>In Slicer open <b>View → Extensions Manager</b>.</li>
+      <li>Click <b>Install from file…</b> (top right) and choose the <code>.tar.gz</code>.</li>
+      <li>Click <b>Restart</b> when asked.</li>
+    </ol>
+    <figure>
+      <img src="img/install-extensions-manager.png" alt="Extensions Manager toolbar with the Install from file button at the top right">
+      <figcaption>Extensions Manager. <i>Install from file…</i> is in the top right; the installed extension appears in this list after the restart.</figcaption>
+    </figure>
+    <div class="note">
+      <b>Working from the source tree instead?</b> <i>Edit → Application Settings → Modules → Additional module paths → Add</i>,
+      point it at the folder that contains <code>GTReview.py</code>, restart. No package needed.
+    </div>
+  </section>
+
+  <section id="open">
+    <h2><span class="step">3</span>Open the plugin</h2>
+    <p>Use the <b>Modules</b> dropdown in the toolbar: it is listed under <b>Segmentation → GT Review</b>.
+      Or click the magnifier next to it and type <code>GT</code>.</p>
+    <figure class="small">
+      <img src="img/select-module.png" alt="The Modules toolbar showing GT Review selected">
+      <figcaption>The module selector with GT Review chosen. The panel opens on the left.</figcaption>
+    </figure>
+  </section>
+
+  <section id="use">
+    <h2><span class="step">4</span>Review a case</h2>
+    <p>The panel has four boxes, top to bottom, in the order you use them. With several sequences per case
+      the views open side by side, one axial view per sequence, and scrolling one scrolls them all.</p>
+    <figure>
+      <img src="img/overview-sequences.png" alt="Slicer with the GTReview panel on the left and four linked axial views showing t1, t1c, t2 and flair">
+      <figcaption>A loaded case: t1, t1c, t2 and flair in the <i>Sequences (axial)</i> layout, the selected lesion outlined in every view.</figcaption>
+    </figure>
+
+    <div class="grid">
+      <div>
+        <h3 class="dataset">Dataset · where the cases are</h3>
+        <ul>
+          <li><b>Batch directory</b>: the folder that holds one sub-folder per case. Press <b>Browse &amp; load…</b>.</li>
+          <li><b>Case</b>: step with <b>&lt; Prev</b> / <b>Next &gt;</b>; the counter shows where you are.</li>
+          <li><b>Mask source</b>: which mask to start from (<code>seg</code>, <code>pred_seg</code>, a saved review, or empty).</li>
+          <li>Tick <b>Skip already reviewed cases</b> to go straight to the unfinished ones.</li>
+        </ul>
+      </div>
+      <figure><img src="img/panel-dataset.png" alt="The Dataset box"></figure>
+    </div>
+
+    <div class="grid">
+      <div>
+        <h3 class="display">Display · what you look at</h3>
+        <ul>
+          <li><b>Image</b>: the sequence for the brush and for single-image layouts.</li>
+          <li><b>Compare with</b> / <b>Blend</b>: overlay a second sequence and fade between the two.</li>
+          <li><b>Layout</b>: <i>Sequences (axial)</i> for all sequences at once, <i>Four-Up</i> for axial, sagittal, coronal and 3D.</li>
+          <li><b>Mask</b>: show or hide the overlay and set its opacity.</li>
+        </ul>
+      </div>
+      <figure><img src="img/panel-display.png" alt="The Display box"></figure>
+    </div>
+
+    <div class="grid">
+      <div>
+        <h3 class="lesions">Lesions · the checklist</h3>
+        <ul>
+          <li>One row per connected lesion, largest first. <b>Click a row</b> to jump every view onto it.</li>
+          <li>Tick <b>Done</b> once you are happy with that lesion. The trash icon deletes it outright.</li>
+          <li><b>+ New lesion</b> unlocks the brush to paint a lesion that is missing.</li>
+          <li>The list recounts itself a moment after you stop painting.</li>
+        </ul>
+      </div>
+      <figure><img src="img/panel-lesions.png" alt="The Lesions box"></figure>
+    </div>
+
+    <div class="grid">
+      <div>
+        <h3 class="editing">Editing · fixing a lesion</h3>
+        <ul>
+          <li>Editing is unlocked only while a lesion is selected or <i>New lesion</i> is active.</li>
+          <li><b>Active label</b>: what the brush lays down: 1 Necrosis and Cavity, 2 Enhancing Tumor, 3 Edema, or Background to erase.</li>
+          <li><b>Paint over</b>: which existing voxels the brush may replace.</li>
+          <li><b>Paint</b>, <b>Erase</b>, <b>Sphere threshold</b> (click the centre, drag outwards, release).</li>
+          <li><b>Undo</b> steps back one whole stroke. <b>Reset</b> reloads the mask from disk.</li>
+          <li>Untick <b>Live fill</b> if long strokes stutter on big volumes.</li>
+        </ul>
+      </div>
+      <figure><img src="img/panel-editing-paint.png" alt="The Editing box with Paint active"></figure>
+    </div>
+
+    <h3>Save</h3>
+    <p>When every lesion is ticked Done, <b>Save &amp; next case</b> at the bottom writes
+      <code>&lt;case&gt;_reviewed_seg.nii.gz</code> next to the original files and moves on. The original masks are never modified.</p>
+    <figure>
+      <img src="img/overview-fourup.png" alt="Four-Up layout with the lesion shown in three planes and in 3D">
+      <figcaption><i>Four-Up</i> layout while editing: the three labels of one lesion in axial, coronal and sagittal, plus the 3D view.</figcaption>
+    </figure>
+  </section>
+
+  <section id="keys">
+    <h2>Keys</h2>
+    <table class="keys">
+      <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></td><td>Paint, Erase, Sphere threshold</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>stop editing</td></tr>
+      <tr><td><kbd>Del</kbd></td><td>delete the selected lesion</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></td><td>undo / redo a whole stroke</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>save without moving on</td></tr>
+      <tr><td><kbd>a</kbd> / <kbd>d</kbd></td><td>mask more transparent / more opaque</td></tr>
+      <tr><td><kbd>s</kbd></td><td>hide / show the mask</td></tr>
+    </table>
+  </section>
+
+  <footer>
+    GTReview for 3D Slicer 5.10 · <a href="panel-guide.html">Panel guide</a> ·
+    <a href="https://github.com/melandur/SlicerGTReview">Source and packages</a>
+  </footer>
+</main>
+</body>
+</html>
