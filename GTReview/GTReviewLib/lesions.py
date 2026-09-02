@@ -136,6 +136,7 @@ def find_lesions(
     spacing_ijk,
     connectivity: int = 26,
     min_voxels: int = 1,
+    dilate: int = 0,
 ) -> Tuple[np.ndarray, List[Lesion]]:
     """Find lesions (connected components) in a segmentation mask.
 
@@ -154,6 +155,13 @@ def find_lesions(
     min_voxels:
         Components with fewer than ``min_voxels`` voxels are discarded.  Values
         below 1 are treated as 1.
+    dilate:
+        Grow the binarised mask by this many voxels (with the same
+        ``connectivity`` structure) *before* labelling, so fragments separated
+        by a gap of up to ``2 * dilate`` voxels are reported as one lesion.
+        The labels are then mapped back onto the original voxels only:
+        counts, volumes, centroids and boxes never include grown voxels and
+        the component map is 0 wherever the input is 0.  0 disables it.
 
     Returns
     -------
@@ -192,7 +200,13 @@ def find_lesions(
     arr = np.ascontiguousarray(arr)
     binary = arr != 0
 
-    raw_map, n_raw = ndimage.label(binary, structure=structure)
+    dilate = max(0, int(dilate))
+    if dilate:
+        grown = ndimage.binary_dilation(binary, structure=structure, iterations=dilate)
+        raw_map, n_raw = ndimage.label(grown, structure=structure)
+        raw_map[~binary] = 0  # bridge the gaps, but keep only real voxels
+    else:
+        raw_map, n_raw = ndimage.label(binary, structure=structure)
     empty_map = np.zeros(arr.shape, dtype=np.int32)
     if n_raw == 0:
         return empty_map, []

@@ -33,6 +33,45 @@ except ImportError:  # pragma: no cover - fallback: load straight from the file
 ISO = (1.0, 1.0, 1.0)
 
 
+class TestDilate(unittest.TestCase):
+    """``dilate`` bridges small gaps but never adds voxels to the result."""
+
+    def _two_blobs(self, gap):
+        mask = np.zeros((10, 10, 10), dtype=np.uint8)
+        mask[2:4, 2:4, 2:4] = 1
+        mask[2:4, 2:4, 4 + gap:6 + gap] = 2
+        return mask
+
+    def test_default_is_off(self):
+        mask = self._two_blobs(gap=1)
+        self.assertEqual(len(find_lesions(mask, ISO)[1]), 2)
+        self.assertEqual(len(find_lesions(mask, ISO, dilate=0)[1]), 2)
+
+    def test_one_voxel_gap_bridged(self):
+        mask = self._two_blobs(gap=1)
+        cmap, found = find_lesions(mask, ISO, dilate=1)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].voxel_count, 16)  # real voxels only
+        self.assertTrue(np.array_equal(cmap != 0, mask != 0))
+        self.assertEqual(found[0].bbox_ijk, ((2, 4), (2, 4), (2, 7)))
+
+    def test_two_voxel_gap_bridged_by_one_voxel_dilation(self):
+        # both sides grow by one, so a gap of two closes
+        self.assertEqual(len(find_lesions(self._two_blobs(gap=2), ISO, dilate=1)[1]), 1)
+
+    def test_three_voxel_gap_stays_apart(self):
+        self.assertEqual(len(find_lesions(self._two_blobs(gap=3), ISO, dilate=1)[1]), 2)
+        self.assertEqual(len(find_lesions(self._two_blobs(gap=3), ISO, dilate=2)[1]), 1)
+
+    def test_min_voxels_counts_real_voxels(self):
+        mask = np.zeros((8, 8, 8), dtype=np.uint8)
+        mask[3, 3, 3] = 1  # one voxel, would be 27 after dilation
+        self.assertEqual(len(find_lesions(mask, ISO, dilate=1, min_voxels=2)[1]), 0)
+
+    def test_negative_dilate_is_off(self):
+        self.assertEqual(len(find_lesions(self._two_blobs(gap=1), ISO, dilate=-1)[1]), 2)
+
+
 class TestEmptyAndDegenerate(unittest.TestCase):
     def test_all_zero_mask(self):
         mask = np.zeros((8, 9, 10), dtype=np.int16)

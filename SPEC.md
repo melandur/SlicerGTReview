@@ -67,9 +67,9 @@ Saving writes `<case_dir>/<case_id>_reviewed_seg.nii.gz`.
    a / d mask 10% more transparent / opaque, s hide+show mask.
 7. **Editing is gated** — the brush, Delete and the threshold effects only work
    while a lesion is selected in the table, or while "New lesion → Start painting"
-   is active.  Only labels 1 (Necrosis and Cavity) and 2 (Enhancing Tumor) exist;
-   both segments are always present so either can be painted, and nothing in the
-   UI can add a third.  **Sphere threshold** (a GTReview Segment Editor effect):
+   is active.  Only labels 1 (Necrosis and Cavity), 2 (Enhancing Tumor) and
+   3 (Edema) exist; all three segments are always present so any can be
+   painted, and nothing in the UI can add a fourth.  **Sphere threshold** (a GTReview Segment Editor effect):
    click the centre of a lesion — that voxel's intensity ± a tolerance is the
    range — drag to pull a physical sphere, release to add every in-range voxel in
    the sphere that is connected to the seed; one undo step, plain voxel mask.  The

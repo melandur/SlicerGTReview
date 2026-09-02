@@ -77,7 +77,7 @@ for _name in [_n for _n in list(sys.modules)
 del _name, _file
 
 try:
-    from GTReviewLib import dataset, lesions, maskio
+    from GTReviewLib import dataset, layouts, lesions, maskio
 except ImportError as exc:  # pragma: no cover - broken install
     raise ImportError(
         "GTReview could not import GTReviewLib from {} — is the extension "
@@ -117,6 +117,7 @@ def colorForLabelValue(value):
 LABEL_NAMES = {
     1: "Necrosis and Cavity",
     2: "Enhancing Tumor",
+    3: "Edema",
 }
 
 
@@ -157,7 +158,17 @@ def nameForLabelValue(value):
     name = LABEL_NAMES.get(value)
     return "{} - {}".format(value, name) if name else str(value)
 
+# Lesion detection grows the mask by this many voxels before connected
+# components, so fragments separated by a small gap are one lesion.
+LESION_DILATE_VOXELS = 1
+
+# Custom layout: one axial view per loaded sequence.  Registered per case in
+# GTReviewWidget.applyLayout because the number of views depends on the data;
+# the XML itself comes from GTReviewLib.layouts (pure python, unit-tested).
+SEQUENCES_LAYOUT_ID = 5100
+
 LAYOUT_CHOICES = (
+    ("Sequences (axial)", None, SEQUENCES_LAYOUT_ID),
     ("Four-Up", "SlicerLayoutFourUpView", 3),
     ("1x1 Red (axial)", "SlicerLayoutOneUpRedSliceView", 6),
     ("1x1 Yellow (sagittal)", "SlicerLayoutOneUpYellowSliceView", 7),
@@ -169,7 +180,19 @@ LAYOUT_CHOICES = (
 
 def layoutId(attributeName, fallback):
     """Layout id by name, tolerant of Slicer renaming a constant."""
+    if attributeName is None:
+        return int(fallback)
     return int(getattr(slicer.vtkMRMLLayoutNode, attributeName, fallback))
+
+
+def sequenceOrder(keys):
+    """t1, t1c, t2, flair first (in that order), then the rest naturally."""
+    return layouts.sequence_order(keys)
+
+
+def sequencesLayoutXml(keys):
+    """Layout XML with one axial slice view per sequence key, in a grid."""
+    return layouts.sequences_layout_xml(keys)
 
 
 def arrayFromVolumeIJK(volumeNode):
@@ -757,12 +780,20 @@ class GTReviewLogic(ScriptedLoadableModuleLogic):
         return array
 
     # ----------------------------------------------------------------- lesions
-    def computeLesions(self, minVoxels=1, connectivity=26):
-        """``(component_map, [Lesion, ...])`` over the CURRENT segmentation."""
+    def computeLesions(self, minVoxels=1, connectivity=26, dilate=LESION_DILATE_VOXELS):
+        """``(component_map, [Lesion, ...])`` over the CURRENT segmentation.
+
+        The mask is grown by ``dilate`` voxels before labelling so fragments a
+        voxel or two apart count as one lesion; sizes still count real voxels.
+        """
         array = self.exportLabelmapArrayIJK()
         spacing = tuple(self.maskGeometry.spacing)
         return lesions.find_lesions(
-            array, spacing, connectivity=connectivity, min_voxels=int(minVoxels)
+            array,
+            spacing,
+            connectivity=connectivity,
+            min_voxels=int(minVoxels),
+            dilate=int(dilate),
         )
 
     # ------------------------------------------------------- undo-aware edits
@@ -968,6 +999,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._shortcuts = []
         self._shortcutHandlers = []
         self._updatingGui = False
+        self._layoutChosenByUser = False
         self._refreshTimer = None
         self._flashTimer = None
         self._flashNode = None
@@ -1652,8 +1684,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         inner = table.findChild(qt.QTableView, "SegmentsTable")
         if inner is not None:
             inner.setContextMenuPolicy(qt.Qt.NoContextMenu)
-        # There are always exactly two rows; height the table to them so the
-        # panel is not padded with empty space below label 2.
+        # There is always exactly one row per label; height the table to them
+        # so the panel is not padded with empty space below the last label.
         self._compactSegmentsTable(table, inner)
 
     def _compactSegmentsTable(self, table, inner):
@@ -2243,6 +2275,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._attachEditor()
         self.applyMaskDisplay()
         self._startObservingSegmentation()
+        self._chooseDefaultLayout()
         self.applyLayout()
         self.applyViewLayers()
         self.onFitViews()
@@ -2767,9 +2800,20 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.windowLevelWidget is not None:
             self.windowLevelWidget.setMRMLVolumeNode(background)
             self.windowLevelWidget.setEnabled(background is not None)
+        perView = self._sequencesLayoutActive()
         for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
-            compositeNode.SetBackgroundVolumeID(background.GetID() if background else "")
-            compositeNode.SetForegroundVolumeID(foreground.GetID() if foreground else "")
+            own = self.logic.volumeNodes.get(compositeNode.GetLayoutName()) if perView else None
+            if own is not None:
+                # sequences layout: each view shows the sequence it is named after
+                compositeNode.SetBackgroundVolumeID(own.GetID())
+                compositeNode.SetForegroundVolumeID("")
+                # and scrolling / panning / zooming in one drives the others,
+                # live rather than on mouse release
+                compositeNode.SetLinkedControl(True)
+                compositeNode.SetHotLinkedControl(True)
+            else:
+                compositeNode.SetBackgroundVolumeID(background.GetID() if background else "")
+                compositeNode.SetForegroundVolumeID(foreground.GetID() if foreground else "")
             compositeNode.SetForegroundOpacity(opacity)
             compositeNode.SetLabelVolumeID("")
         # a new layout can bring new slice nodes, so re-apply this here
@@ -2778,8 +2822,26 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     @guarded("Changing the layout")
     def onLayoutChanged(self, index=None):
         del index
+        self._layoutChosenByUser = True
         self.applyLayout()
         self.applyViewLayers()
+
+    def _sequencesLayoutActive(self):
+        value = self.layoutComboBox.itemData(self.layoutComboBox.currentIndex)
+        return value is not None and int(value) == SEQUENCES_LAYOUT_ID
+
+    def _sequenceKeys(self):
+        return sequenceOrder(self.logic.volumeNodes) if self.logic is not None else []
+
+    def _chooseDefaultLayout(self):
+        """Multi-sequence cases open side by side in axial views, single ones
+        in Four-Up, unless the reviewer has picked a layout themselves."""
+        if self._layoutChosenByUser:
+            return
+        wanted = SEQUENCES_LAYOUT_ID if len(self._sequenceKeys()) > 1 else layoutId("SlicerLayoutFourUpView", 3)
+        index = self.layoutComboBox.findData(wanted)
+        if index >= 0:
+            self.layoutComboBox.currentIndex = index
 
     def applyLayout(self):
         layoutManager = slicer.app.layoutManager()
@@ -2788,7 +2850,23 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         value = self.layoutComboBox.itemData(self.layoutComboBox.currentIndex)
         if value is None:
             return
-        layoutManager.setLayout(int(value))
+        value = int(value)
+        if value == SEQUENCES_LAYOUT_ID:
+            keys = self._sequenceKeys()
+            if not keys:
+                value = layoutId("SlicerLayoutFourUpView", 3)
+            else:
+                layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+                xml = sequencesLayoutXml(keys)
+                if layoutNode.IsLayoutDescription(SEQUENCES_LAYOUT_ID):
+                    if layoutNode.GetLayoutDescription(SEQUENCES_LAYOUT_ID) != xml:
+                        layoutNode.SetLayoutDescription(SEQUENCES_LAYOUT_ID, xml)
+                        if layoutManager.layout == SEQUENCES_LAYOUT_ID:
+                            # same id, new views: force the manager to rebuild
+                            layoutManager.setLayout(layoutId("SlicerLayoutFourUpView", 3))
+                else:
+                    layoutNode.AddLayoutDescription(SEQUENCES_LAYOUT_ID, xml)
+        layoutManager.setLayout(value)
 
     @guarded("Resetting the field of view")
     def onFitViews(self):
@@ -2802,6 +2880,26 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logic = widget.sliceLogic()
             if logic is not None:
                 logic.FitSliceToAll()
+        self._syncSequenceViews()
+
+    def _syncSequenceViews(self):
+        """Fresh sequence views start wherever their own volume put them;
+        line them up on the first one so linked scrolling starts in step."""
+        if not self._sequencesLayoutActive():
+            return
+        layoutManager = slicer.app.layoutManager()
+        lead = None
+        for key in self._sequenceKeys():
+            widget = layoutManager.sliceWidget(key)
+            if widget is None:
+                continue
+            sliceNode = widget.mrmlSliceNode()
+            if lead is None:
+                lead = sliceNode
+                continue
+            sliceNode.SetFieldOfView(*lead.GetFieldOfView())
+            sliceNode.GetSliceToRAS().DeepCopy(lead.GetSliceToRAS())
+            sliceNode.UpdateMatrices()
 
     # ------------------------------------------------------------ lesion slots
     def _startObservingSegmentation(self):
@@ -3369,7 +3467,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         "Background only" and "Only <label>" are Slicer's EditAllowedOutside-
         AllSegments and EditAllowedInsideSingleSegment.  The overwrite mode
-        stays OverwriteAllSegments throughout: the two labels are mutually
+        stays OverwriteAllSegments throughout: the labels are mutually
         exclusive in the saved NIfTI, so painting one has to take the voxel
         away from the other -- that is not what Paint over is asking about.
         """
@@ -3561,7 +3659,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # so the count and the label are spelled out before anything goes.
         if not slicer.util.confirmYesNoDisplay(
             "Delete lesion {} ({})?\n\n"
-            "{} voxels, {:.1f} mm3, removed from both labels.\n"
+            "{} voxels, {:.1f} mm3, removed from every label.\n"
             "This can be undone (Ctrl+Z), and nothing is written to disk "
             "until you save.".format(
                 lesion.index,
@@ -3695,7 +3793,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 3000,
             )
             return
-        target = others[0]
+        higher = [v for v in others if v > int(lesion.label)]
+        target = higher[0] if higher else others[0]  # 1 -> 2 -> 3 -> 1
         mask = lesions.lesion_mask(self.componentMap, lesion.index)
         with BusyCursor("GTReview: lesion {} -> label {} ...".format(lesion.index, target)):
             self._markEdit()
@@ -4218,7 +4317,7 @@ class GTReviewTest(ScriptedLoadableModuleTest):
         self.say("Case loaded")
 
         # --- label mapping / round trip -----------------------------------
-        self.assertEqual(sorted(self.logic.labelValues()), [1, 2])
+        self.assertEqual(sorted(self.logic.labelValues()), sorted(LABEL_NAMES))
         exported = self.logic.exportLabelmapArrayIJK()
         self.assertEqual(tuple(exported.shape), tuple(sourceMask.shape))
         self.assertTrue(
@@ -4244,14 +4343,15 @@ class GTReviewTest(ScriptedLoadableModuleTest):
 
         # --- add a label ---------------------------------------------------
         newSegmentId = self.logic.addLabel()
-        self.assertEqual(self.logic.labelValueForSegmentId(newSegmentId), 3)
-        self.assertEqual(sorted(self.logic.labelValues()), [1, 2, 3])
+        nextValue = max(LABEL_NAMES) + 1
+        self.assertEqual(self.logic.labelValueForSegmentId(newSegmentId), nextValue)
+        self.assertEqual(sorted(self.logic.labelValues()), sorted(LABEL_NAMES) + [nextValue])
         exported = self.logic.exportLabelmapArrayIJK()
         self.assertTrue(
             np.array_equal(exported.astype(np.uint8), sourceMask),
             "an empty extra segment must not renumber the exported labels",
         )
-        self.say("Add label OK (label 3, no renumbering)")
+        self.say("Add label OK (label {}, no renumbering)".format(nextValue))
 
         # --- undo-aware edits ---------------------------------------------
         # Only the widget being unavailable may skip the rest; anything that

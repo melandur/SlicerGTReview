@@ -9,8 +9,9 @@ importing this package never fails when those are absent.
 """
 
 from . import dataset  # noqa: F401
+from . import layouts  # noqa: F401
 
-__all__ = ["dataset"]
+__all__ = ["dataset", "layouts"]
 
 for _name in ("lesions", "maskio"):
     try:

@@ -16,6 +16,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   ${MODULE_NAME}Lib/__init__.py
   ${MODULE_NAME}Lib/dataset.py
+  ${MODULE_NAME}Lib/layouts.py
   ${MODULE_NAME}Lib/lesions.py
   ${MODULE_NAME}Lib/maskio.py
   ${MODULE_NAME}Lib/SegmentEditorSphereThresholdEffect.py

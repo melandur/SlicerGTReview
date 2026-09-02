@@ -30,7 +30,10 @@ from a share.
 - **Multi-sequence display** — every image key found in a case (`t1`, `t1c`,
   `t2`, `flair`, `adc`, `dwi`, …) is loaded as its own volume. Choose which goes
   to background and which to foreground, set the foreground opacity, and switch
-  layout (Four-Up, 1x1 axial / sagittal / coronal, 2x2 slices, Conventional).
+  layout (Sequences, Four-Up, 1x1 axial / sagittal / coronal, 2x2 slices,
+  Conventional). *Sequences (axial)* shows every sequence of the case in its own
+  axial view, ordered t1, t1c, t2, flair, then the rest; it is chosen
+  automatically for cases with more than one image until you pick a layout.
 - **Mask source picker** — start from `seg`, `gt`, `pred_seg`, any other mask
   present, an existing `reviewed_seg` (to resume), or an empty segmentation.
 - **Contrast** — window/level for the image layer, with Slicer's auto/manual
@@ -41,7 +44,9 @@ from a share.
   planes cut the voxel grid diagonally and a stroke drawn as a disc is
   committed as a stair-stepped one. Untick for true axial / coronal / sagittal.
 - **Lesion list** — 26-connectivity connected components over the current mask,
-  in a sortable table of `#`, `Voxels`, `Volume (mm3)`, `Done` and a per-row
+  found after growing it by one voxel so fragments up to two voxels apart count
+  as one lesion (voxel counts and volumes still cover only the real mask), in a
+  sortable table of `#`, `Voxels`, `Volume (mm3)`, `Done` and a per-row
   delete button, default sorted by volume descending. Selecting a row jumps
   every slice view to that lesion's centre and highlights it. The centre is the
   centre of mass snapped to the nearest voxel that is actually *inside* the
@@ -51,13 +56,14 @@ from a share.
   deleted or grows past it. *Done* is tracked by seed voxel, not by number, so
   the ticks survive the renumbering.
 - **Editing tools** — `Active label` chooses what the brush lays down (label 1,
-  label 2, or Background, which is the Erase tool); `Paint over` chooses what
+  2, 3, or Background, which is the Erase tool); `Paint over` chooses what
   may be overwritten (all labels, background only, or one named label) and
   drives the segment editor's masking. Then Paint, Erase and GTReview's own
   Sphere threshold (click the centre, drag to pull a sphere; tick **2D** to keep
   only the slice you drew on). "New lesion" paints a fresh component with the
-  active label. Plus Undo, Redo and Reset-to-loaded. Only labels 1 and 2 exist
-  and nothing in the UI can add another. Editing is locked until a lesion is
+  active label. Plus Undo, Redo and Reset-to-loaded. Only labels 1 (Necrosis
+  and Cavity), 2 (Enhancing Tumor) and 3 (Edema) exist and nothing in the UI
+  can add another. Editing is locked until a lesion is
   selected (or New lesion is active).
 - **Painting is immediate and undo is per stroke** — Slicer's delayed paint is
   off, so the segmentation follows the cursor instead of leaving outlined

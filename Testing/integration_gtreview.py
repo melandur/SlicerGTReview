@@ -23,7 +23,13 @@ interactors.  On a synthetic case (numpy + SimpleITK, never patient data) it
 6. deletes a lesion with its row's trash button, confirmation stubbed,
 7. saves, then removes the review with the Delete review button, confirmation
    stubbed, and checks the file is gone and the case reopened from its
-   original mask.
+   original mask,
+8. opens a second, multi-sequence case (t1, t1c, t2, flair) and checks the
+   Sequences (axial) layout is chosen on its own, shows each sequence in its
+   own axial view, links the views so a scroll in one moves the others, and
+   gives way to a layout the reviewer picked; also that the lesion list bridges
+   a one-voxel gap (dilation before connected components) and that label 3
+   (Edema) is present, paintable and exported as 3.
 
 The file is deliberately NOT named ``test_*``: the unit suite
 (``PythonSlicer -m unittest discover -s Testing``) must not pick it up, because
@@ -123,6 +129,33 @@ def buildSyntheticCase(root):
     _writeVolume(os.path.join(caseDir, CASE_ID + "_seg.nii.gz"), mask)
     _writeVolume(os.path.join(caseDir, CASE_ID + "_t1c.nii.gz"), image)
     return caseDir, mask, image
+
+
+MULTI_CASE_ID = "IT_002"
+MULTI_SEQUENCES = ("flair", "t2", "t1c", "t1")  # deliberately out of display order
+#: two label-1 blocks one voxel apart along i: one lesion after dilation
+GAP_A = (slice(4, 8), slice(4, 8), slice(3, 6))     # 48 voxels
+GAP_B = (slice(9, 12), slice(4, 8), slice(3, 6))    # 36 voxels, gap at i == 8
+GAP_VOXELS = 4 * 4 * 3 + 3 * 4 * 3
+#: and a far-away label-2 block that must stay its own lesion
+FAR_C = (slice(22, 26), slice(22, 26), slice(6, 9))  # 48 voxels
+FAR_C_VOXELS = 4 * 4 * 3
+
+
+def buildMultiSequenceCase(root):
+    """Write ``<root>/IT_002/`` with four sequences and one mask; return the dir."""
+    caseDir = os.path.join(root, MULTI_CASE_ID)
+    os.makedirs(caseDir)
+    mask = np.zeros(SIZE, dtype=np.uint8)
+    mask[GAP_A] = 1
+    mask[GAP_B] = 1
+    mask[FAR_C] = 2
+    for n, key in enumerate(MULTI_SEQUENCES, start=1):
+        image = np.full(SIZE, BACKGROUND_INTENSITY * n, dtype=np.int16)
+        image[mask > 0] = LESION_INTENSITY
+        _writeVolume(os.path.join(caseDir, "{}_{}.nii.gz".format(MULTI_CASE_ID, key)), image)
+    _writeVolume(os.path.join(caseDir, MULTI_CASE_ID + "_seg.nii.gz"), mask)
+    return caseDir, mask
 
 
 def _writeVolume(path, array_ijk):
@@ -254,6 +287,22 @@ def planesOf(mask_ijk):
     return sorted(set(int(k) for k in np.argwhere(mask_ijk)[:, 2]))
 
 
+def backgroundNameOf(sliceWidget):
+    node = slicer.mrmlScene.GetNodeByID(
+        sliceWidget.mrmlSliceCompositeNode().GetBackgroundVolumeID() or ""
+    )
+    return node.GetName() if node is not None else None
+
+
+def scrollLikeTheMouse(sliceWidget, deltaMm):
+    """Move the slice offset the way the interactor does, so linking broadcasts."""
+    logic = sliceWidget.sliceLogic()
+    logic.StartSliceOffsetInteraction()
+    logic.SetSliceOffset(logic.GetSliceOffset() + deltaMm)
+    logic.EndSliceOffsetInteraction()
+    pump(0.1)
+
+
 def rowOfLesion(widget, lesionIndex):
     for row in range(widget.lesionTable.rowCount):
         item = widget.lesionTable.item(row, widget.LESION_COLUMN_NUMBER)
@@ -278,6 +327,7 @@ class GTReviewIntegrationTest(unittest.TestCase):
     beforeStroke = None
     afterStroke = None
     savedHistory = None
+    multiRoot = None
 
     @classmethod
     def setUpClass(cls):
@@ -614,6 +664,139 @@ class GTReviewIntegrationTest(unittest.TestCase):
         CHECKS.check(len(widget.lesionList) == 2,
                      "both lesions are listed again",
                      "{} lesions".format(len(widget.lesionList)))
+
+
+    def test_09_multi_sequence_case(self):
+        CHECKS.step("Opening a case with four sequences")
+        widget = self.widget
+        self.__class__.multiRoot = tempfile.mkdtemp(prefix="gtreview_integration_multi_")
+        _caseDir, multiMask = buildMultiSequenceCase(self.multiRoot)
+
+        # test_01 picked a layout by hand; a fresh reviewer has not
+        widget._layoutChosenByUser = False
+        widget.datasetPathEdit.currentPath = self.multiRoot
+        with ConfirmStub(True):
+            widget.onLoadDataset()
+        pump()
+        case = widget.currentCase()
+        CHECKS.check(case is not None and case.case_id == MULTI_CASE_ID,
+                     "the multi-sequence case was loaded")
+        CHECKS.check(sorted(widget.logic.volumeNodes) == sorted(MULTI_SEQUENCES),
+                     "every sequence became its own volume node",
+                     str(sorted(widget.logic.volumeNodes)))
+
+        # ---- layout chosen on its own, one axial view per sequence ----------
+        layoutManager = slicer.app.layoutManager()
+        CHECKS.check(layoutManager.layout == gtreview.SEQUENCES_LAYOUT_ID,
+                     "the Sequences (axial) layout was chosen automatically",
+                     "layout id {}".format(layoutManager.layout))
+        CHECKS.check(widget.layoutComboBox.currentText == "Sequences (axial)",
+                     "and the Layout box says so")
+        order = widget._sequenceKeys()
+        CHECKS.check(order == ["t1", "t1c", "t2", "flair"],
+                     "the views are ordered t1, t1c, t2, flair", str(order))
+        for key in order:
+            view = sliceWidgetNamed(key)
+            CHECKS.check(view.mrmlSliceNode().GetOrientation() == "Axial",
+                         "the {} view is axial".format(key),
+                         view.mrmlSliceNode().GetOrientation())
+            CHECKS.check(backgroundNameOf(view) == "{}_{}".format(MULTI_CASE_ID, key),
+                         "the {} view shows the {} volume".format(key, key),
+                         str(backgroundNameOf(view)))
+            CHECKS.check(not view.mrmlSliceCompositeNode().GetForegroundVolumeID(),
+                         "the {} view has no foreground blend".format(key))
+        visible = [k for k in order if sliceWidgetNamed(k).visible]
+        CHECKS.check(visible == order, "all four views are on screen", str(visible))
+        CHECKS.check(not layoutManager.sliceWidget("Red").visible,
+                     "the Red view is not part of it")
+
+        # ---- linked interaction ---------------------------------------------
+        for key in order:
+            composite = sliceWidgetNamed(key).mrmlSliceCompositeNode()
+            CHECKS.check(composite.GetLinkedControl() and composite.GetHotLinkedControl(),
+                         "the {} view is hot-linked".format(key))
+        offsets = [sliceWidgetNamed(k).mrmlSliceNode().GetSliceOffset() for k in order]
+        CHECKS.check(max(offsets) - min(offsets) < 1e-6,
+                     "the views start on the same slice", str(offsets))
+        before = offsets[0]
+        scrollLikeTheMouse(sliceWidgetNamed("t2"), 2 * SPACING[2])
+        after = [sliceWidgetNamed(k).mrmlSliceNode().GetSliceOffset() for k in order]
+        CHECKS.check(all(abs(o - (before + 2 * SPACING[2])) < 1e-6 for o in after),
+                     "scrolling the t2 view moved all four views two slices",
+                     str(after))
+
+        # ---- dilation before connected components ---------------------------
+        CHECKS.check(len(widget.lesionList) == 2,
+                     "the two blocks one voxel apart are ONE lesion, the far one another",
+                     "{} lesions".format(len(widget.lesionList)))
+        biggest = widget.lesionList[0]
+        CHECKS.check(biggest.voxel_count == GAP_VOXELS,
+                     "the bridged lesion counts only real voxels, not the grown ones",
+                     "{} voxels".format(biggest.voxel_count))
+        CHECKS.check(widget.lesionList[1].voxel_count == FAR_C_VOXELS,
+                     "the far lesion is untouched")
+        CHECKS.check(np.array_equal(widget.componentMap != 0, multiMask != 0),
+                     "the component map covers exactly the mask voxels")
+        _map, undilated = widget.logic.computeLesions(dilate=0)
+        CHECKS.check(len(undilated) == 3, "without dilation the same mask has three lesions",
+                     "{} lesions".format(len(undilated)))
+
+        # ---- label 3 (Edema) ------------------------------------------------
+        CHECKS.check(sorted(widget.logic.labelValues()) == [1, 2, 3],
+                     "labels 1, 2 and 3 are all present on a mask that has no 3",
+                     str(sorted(widget.logic.labelValues())))
+        CHECKS.check(widget.activeLabelComboBox.findData(3) >= 0,
+                     "Active label offers 3 - Edema")
+        CHECKS.check(widget.paintOverComboBox.findData(3) >= 0,
+                     "Paint over offers Only 3 - Edema")
+        CHECKS.check(gtreview.nameForLabelValue(3) == "3 - Edema",
+                     "and it is called Edema", gtreview.nameForLabelValue(3))
+        widget.lesionTable.selectRow(1)  # the far, label-2 lesion
+        pump(0.1)
+        lesion = widget.selectedLesion()
+        CHECKS.check(lesion is not None and int(lesion.label) == 2, "the far lesion is selected")
+        widget._markEdit()
+        widget.logic.changeLesionLabel(
+            gtreview.lesions.lesion_mask(widget.componentMap, lesion.index), 3
+        )
+        widget.unsavedChanges = True
+        widget.refreshLesions()
+        pump(0.1)
+        exported = widget.logic.exportLabelmapArrayIJK()
+        CHECKS.check(int((exported == 3).sum()) == FAR_C_VOXELS,
+                     "relabelling a lesion to 3 exports those voxels as 3",
+                     "{} voxels".format(int((exported == 3).sum())))
+        CHECKS.check(int((exported == 2).sum()) == 0, "and nothing is left as 2")
+        CHECKS.check(any(int(l.label) == 3 for l in widget.lesionList),
+                     "the lesion list reports the label-3 lesion")
+        widget._selectSegmentForLabel(3)
+        pump(0.1)
+        CHECKS.check(
+            widget.logic.labelValueForSegmentId(widget.editor.currentSegmentID()) == 3,
+            "the brush can be set to label 3",
+        )
+
+        # ---- a layout picked by hand sticks across reloads ------------------
+        index = widget.layoutComboBox.findText("Four-Up")
+        widget.layoutComboBox.currentIndex = index
+        widget.onLayoutChanged()
+        pump()
+        CHECKS.check(layoutManager.layout == gtreview.layoutId("SlicerLayoutFourUpView", 3),
+                     "choosing Four-Up by hand applies it")
+        with ConfirmStub(True):
+            widget.setCurrentCaseIndex(widget.currentCaseIndex, force=True)
+        pump()
+        CHECKS.check(layoutManager.layout == gtreview.layoutId("SlicerLayoutFourUpView", 3),
+                     "reloading the case keeps the layout the reviewer chose",
+                     "layout id {}".format(layoutManager.layout))
+        red = sliceWidgetNamed("Red")
+        CHECKS.check(backgroundNameOf(red) == "{}_{}".format(
+            MULTI_CASE_ID, widget.backgroundComboBox.currentText),
+            "in Four-Up every view shows the Image box's choice",
+            str(backgroundNameOf(red)))
+        widget.unsavedChanges = False
+        if self.multiRoot and os.path.isdir(self.multiRoot):
+            shutil.rmtree(self.multiRoot, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #

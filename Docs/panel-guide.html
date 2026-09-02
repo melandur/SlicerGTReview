@@ -23,6 +23,7 @@
 
     --label-1: #d92b2b;
     --label-2: #2f9c3b;
+    --label-3: #2f7fd9;
 
     --warn-bg: #fdf3e7;
     --warn-ru: #e0a561;
@@ -47,6 +48,7 @@
 
       --label-1: #f26a6a;
       --label-2: #62c96f;
+      --label-3: #6aa8f2;
 
       --warn-bg: #231d13;
       --warn-ru: #8a6a3b;
@@ -71,6 +73,7 @@
 
     --label-1: #f26a6a;
     --label-2: #62c96f;
+    --label-3: #6aa8f2;
 
     --warn-bg: #231d13;
     --warn-ru: #8a6a3b;
@@ -489,7 +492,7 @@
         <div class="ctl">
           <div class="ctl-name">🗑<span class="kind">per-row button</span></div>
           <div class="ctl-body">
-            <p>Deletes that whole lesion — every one of its voxels, from both labels. It asks
+            <p>Deletes that whole lesion — every one of its voxels, from every label. It asks
               first, naming the voxel count, and it is undoable with
               <span class="k">Ctrl+Z</span>. Nothing is written to disk until you save.</p>
           </div>
@@ -541,6 +544,7 @@
             <ul>
               <li><span class="swatch-inline" style="background: var(--label-1)"></span><code>1 - Necrosis and Cavity</code></li>
               <li><span class="swatch-inline" style="background: var(--label-2)"></span><code>2 - Enhancing Tumor</code></li>
+              <li><span class="swatch-inline" style="background: var(--label-3)"></span><code>3 - Edema</code></li>
               <li><code>Background (erase)</code> — painting background <em>is</em> erasing, so
                 choosing it arms the Erase tool.</li>
             </ul>
@@ -557,7 +561,7 @@
               <li><code>All labels</code> — overwrite anything.</li>
               <li><code>Background only</code> — never touch a voxel that already has a label,
                 so you can fill a gap without eating its neighbour.</li>
-              <li><code>Only 1 - …</code> / <code>Only 2 - …</code> — only that label may be
+              <li><code>Only 1 - …</code> / <code>Only 2 - …</code> / <code>Only 3 - …</code> — only that label may be
                 painted over.</li>
             </ul>
             <p>It applies to all three tools, threshold included.</p>
@@ -676,6 +680,7 @@
       it at are never modified.</p>
     <p>Labels: <span class="swatch-inline" style="background: var(--label-1)"></span>1 Necrosis and
       Cavity · <span class="swatch-inline" style="background: var(--label-2)"></span>2 Enhancing
-      Tumor. No other label exists, and nothing in the panel can add one.</p>
+      Tumor · <span class="swatch-inline" style="background: var(--label-3)"></span>3 Edema.
+      No other label exists, and nothing in the panel can add one.</p>
   </footer>
 </div>
