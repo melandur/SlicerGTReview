@@ -17,6 +17,12 @@ save path in GTReview.py do at runtime:
 * ``natural_key`` beyond the single happy case in the first file: mixed
   digit/text runs, leading zeros, empty input, and the tie-breaking that keeps
   Prev/Next stable when two ids collapse to the same key.
+* what Windows and macOS put in the way: Explorer ``" - Copy"`` duplicates, an
+  older review kept under a longer name, a folder path typed in another letter
+  case than the disk holds, a drive root holding one case's files, and a root
+  the process is refused.  The disks here are case-sensitive and the paths
+  POSIX, so the case-insensitive lookup, the nameless drive root and the
+  refusals are simulated by patching ``os`` for the duration of a test.
 
 Nothing here duplicates ``test_dataset.py``; run both together.
 
@@ -27,10 +33,15 @@ Run with::
         -p 'test_dataset_extra.py' -v
 """
 
+import contextlib
+import errno
+import ntpath
 import os
+import posixpath
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MODULE_ROOT = os.path.join(os.path.dirname(_HERE), "GTReview")
@@ -69,6 +80,11 @@ def make_case(root, case_id, keys, ext=".nii.gz", prefix=None):
         name = "{}_{}{}".format(stem_prefix, key, ext) if stem_prefix else "{}{}".format(key, ext)
         touch(os.path.join(case_dir, name))
     return case_dir
+
+
+# chmod cannot lock a directory against root, who reads it anyway, nor on
+# Windows, where it only sets the read-only attribute and os.geteuid is missing.
+CHMOD_CANNOT_LOCK = getattr(os, "geteuid", lambda: 1)() == 0 or os.name == "nt"
 
 
 class TempTreeTestCase(unittest.TestCase):
@@ -127,7 +143,11 @@ class TestReviewFileLifecycle(TempTreeTestCase):
     def test_symlinked_review_is_followed_and_a_broken_one_is_not(self):
         case = parse_case_files(make_case(self.root, "A6", ["t1c", "seg"]))
         target = touch(os.path.join(self.root, "elsewhere_reviewed_seg.nii.gz"))
-        os.symlink(target, case.reviewed_path)
+        try:
+            os.symlink(target, case.reviewed_path)
+        except OSError as exc:
+            # Windows lets only administrators or Developer Mode make symlinks
+            self.skipTest("cannot create a symlink here: {}".format(exc))
         self.assertTrue(case.is_reviewed)
 
         os.remove(target)
@@ -235,10 +255,13 @@ class TestReviewedNeverBecomesInput(TempTreeTestCase):
     def test_reviewed_classification_of_bare_keys(self):
         self.assertEqual(classify_key("reviewed_seg"), REVIEWED)
         self.assertEqual(classify_key("t1c_reviewed_seg"), REVIEWED)
-        # the rules look at suffixes only, never at the word in the middle:
-        # a trailing "_v2" makes it neither the review output nor a mask
-        self.assertEqual(classify_key("reviewed_seg_v2"), IMAGE)
+        # the review key counts wherever a word starts, so an older review kept
+        # as "_v2" is still a review and never offered as an image; without
+        # the underscore it is just a word ending in "seg", and a mask, and so
+        # is a word that merely ends in the review key
+        self.assertEqual(classify_key("reviewed_seg_v2"), REVIEWED)
         self.assertEqual(classify_key("reviewedseg"), MASK)
+        self.assertEqual(classify_key("unreviewed_seg"), MASK)
         self.assertEqual(classify_key("reviewed"), IMAGE)
 
 
@@ -453,6 +476,479 @@ class TestDiscoveryOrdering(TempTreeTestCase):
         cases = discover_cases(self.root)
         self.assertEqual(iter_case_ids(cases), [c.case_id for c in cases])
         self.assertEqual(iter_case_ids([]), [])
+
+
+# --------------------------------------------------------------------------- #
+# simulated platforms
+# --------------------------------------------------------------------------- #
+# Saved before any patch, so the stand-ins below can reach the real disk.
+_REAL_STAT = os.stat
+_REAL_LISTDIR = os.listdir
+_REAL_SCANDIR = os.scandir
+_REAL_BASENAME = os.path.basename
+
+
+def _resolve_case_insensitively(path):
+    """*path* with each missing component replaced by its one case-insensitive match.
+
+    That is the lookup NTFS and APFS do; a path that exists as spelled, or has
+    no unique match, is returned unchanged.
+    """
+    if not isinstance(path, str) or os.path.lexists(path):
+        return path
+    current = os.sep
+    for part in os.path.abspath(path).split(os.sep):
+        if not part:
+            continue
+        candidate = os.path.join(current, part)
+        if not os.path.lexists(candidate):
+            try:
+                siblings = _REAL_LISTDIR(current)
+            except OSError:
+                return path
+            matches = [name for name in siblings if name.lower() == part.lower()]
+            if len(matches) != 1:
+                return path
+            candidate = os.path.join(current, matches[0])
+        current = candidate
+    return current
+
+
+@contextlib.contextmanager
+def case_insensitive_disk(unlistable=()):
+    """Resolve names in os.stat/listdir/scandir the way NTFS and APFS do.
+
+    ``os.path.isfile`` and ``isdir`` go through ``os.stat`` and follow along.
+    Listing a directory named in *unlistable* is refused.
+    """
+    refused = {os.path.abspath(p) for p in unlistable}
+
+    def stat(path, *args, **kwargs):
+        return _REAL_STAT(_resolve_case_insensitively(path), *args, **kwargs)
+
+    def listdir(path="."):
+        resolved = _resolve_case_insensitively(path)
+        if isinstance(resolved, str) and os.path.abspath(resolved) in refused:
+            raise PermissionError(errno.EACCES, "Permission denied", path)
+        return _REAL_LISTDIR(resolved)
+
+    def scandir(path="."):
+        return _REAL_SCANDIR(_resolve_case_insensitively(path))
+
+    with mock.patch("os.stat", stat), mock.patch("os.listdir", listdir), \
+            mock.patch("os.scandir", scandir):
+        yield
+
+
+@contextlib.contextmanager
+def refused(function_name, *paths, error=None):
+    """Make ``os.<function_name>`` raise for *paths*, as a privacy or ACL block does."""
+    real = getattr(os, function_name)
+    targets = {os.path.abspath(p) for p in paths}
+
+    def stand_in(path=".", *args, **kwargs):
+        if isinstance(path, str) and os.path.abspath(path) in targets:
+            if error is not None:
+                raise error
+            # macOS privacy protection answers EPERM, "Operation not permitted"
+            raise PermissionError(errno.EPERM, "Operation not permitted", path)
+        return real(path, *args, **kwargs)
+
+    with mock.patch("os." + function_name, stand_in):
+        yield
+
+
+@contextlib.contextmanager
+def nameless_directory(path):
+    """Make *path* look like ``Z:\\``: a directory whose last component is empty."""
+    target = os.path.abspath(path).rstrip(os.sep)
+
+    def basename(p):
+        if isinstance(p, str) and p.rstrip(os.sep) == target:
+            return ""
+        return _REAL_BASENAME(p)
+
+    with mock.patch("os.path.basename", basename):
+        yield
+
+
+# --------------------------------------------------------------------------- #
+# Explorer duplicates
+# --------------------------------------------------------------------------- #
+class TestExplorerCopies(TempTreeTestCase):
+    def test_is_nifti_rejects_explorer_copies(self):
+        self.assertFalse(dataset.is_nifti("X_seg - Copy.nii.gz"))
+        self.assertFalse(dataset.is_nifti("X - Copy (2).nii.gz"))
+        self.assertFalse(dataset.is_nifti("X_t1c - copy.nii"))
+        self.assertFalse(dataset.is_nifti("X_SEG - COPY.NII.GZ"))
+        # Explorer puts the marker before the last extension only, which leaves
+        # a name that is no NIfTI at all
+        self.assertFalse(dataset.is_nifti("X_seg.nii - Copy.gz"))
+
+    def test_the_word_copy_on_its_own_is_not_a_duplicate_marker(self):
+        self.assertTrue(dataset.is_nifti("X_t1c_copy.nii.gz"))
+        self.assertTrue(dataset.is_nifti("X - Copyright.nii.gz"))
+
+    def test_copies_never_shadow_or_join_the_real_files(self):
+        case_dir = make_case(self.root, "H1", ["t1c", "seg", "pred_seg"])
+        for name in ("H1_seg - Copy.nii.gz",
+                     "H1_seg - Copy (2).nii.gz",
+                     "H1_t1c - copy.nii",
+                     "H1 - Copy.nii.gz",
+                     "H1_seg.nii - Copy.gz"):
+            touch(os.path.join(case_dir, name))
+        case = parse_case_files(case_dir)
+        self.assertEqual(set(case.masks), {"seg", "pred_seg"})
+        self.assertEqual(set(case.images), {"t1c"})
+        self.assertTrue(case.masks["seg"].endswith("H1_seg.nii.gz"))
+        self.assertEqual(case.default_mask_path(), case.masks["seg"])
+
+    def test_a_folder_of_nothing_but_copies_is_not_a_case(self):
+        copies = os.path.join(self.root, "H2")
+        os.makedirs(copies)
+        touch(os.path.join(copies, "H2_t1c - Copy.nii.gz"))
+        touch(os.path.join(copies, "H2_seg - Copy (3).nii.gz"))
+        make_case(self.root, "H3", ["t1c", "seg"])
+        self.assertEqual(iter_case_ids(discover_cases(self.root)), ["H3"])
+
+    def test_root_fallback_ignores_copies(self):
+        touch(os.path.join(self.root, "x_t1c - Copy.nii.gz"))
+        self.assertEqual(discover_cases(self.root), [])
+
+
+# --------------------------------------------------------------------------- #
+# the review key anywhere in a name
+# --------------------------------------------------------------------------- #
+class TestReviewKeyAnywhere(TempTreeTestCase):
+    def test_keys_containing_the_review_key_are_reviews(self):
+        for key in ("reviewed_seg_v2", "reviewed_seg_old", "old_reviewed_seg",
+                    "Reviewed_Seg_Backup", "t1c_reviewed_seg_2"):
+            self.assertEqual(classify_key(key), REVIEWED, key)
+
+    def test_older_reviews_are_neither_images_nor_masks(self):
+        case_dir = make_case(self.root, "J1", ["t1c", "seg"])
+        for name in ("J1_reviewed_seg_v2.nii.gz",
+                     "J1_reviewed_seg_old.nii",
+                     "reviewed_seg_backup.nii.gz",
+                     "OTHER_reviewed_seg_2.nii.gz"):
+            touch(os.path.join(case_dir, name))
+        case = parse_case_files(case_dir)
+        self.assertEqual(set(case.masks), {"seg"})
+        self.assertEqual(set(case.images), {"t1c"})
+        # only <case_id>_reviewed_seg.nii.gz is the live review
+        self.assertFalse(case.is_reviewed)
+        self.assertEqual(case.default_mask_path(), case.masks["seg"])
+
+    def test_a_folder_holding_only_an_older_review_offers_nothing(self):
+        case_dir = os.path.join(self.root, "J2")
+        os.makedirs(case_dir)
+        touch(os.path.join(case_dir, "J2_reviewed_seg_old.nii.gz"))
+        cases = discover_cases(self.root)
+        self.assertEqual(iter_case_ids(cases), ["J2"])
+        self.assertEqual((cases[0].images, cases[0].masks), ({}, {}))
+        self.assertIsNone(cases[0].default_mask_path())
+
+    def test_a_mask_named_unreviewed_is_offered_as_a_mask(self):
+        # the review key has to start a word; "unreviewed_seg" only ends in it,
+        # and "not_" / "non_" in front negate it
+        keys = ["unreviewed_seg", "prereviewed_seg", "not_reviewed_seg", "non_reviewed_seg"]
+        case_dir = make_case(self.root, "J3", ["t1c"] + keys)
+        case = parse_case_files(case_dir)
+        self.assertEqual(set(case.masks), set(keys))
+        self.assertEqual(set(case.images), {"t1c"})
+        self.assertFalse(case.is_reviewed)
+        self.assertIsNotNone(case.default_mask_path())
+
+
+# --------------------------------------------------------------------------- #
+# the session log GTReview writes into the batch folder
+# --------------------------------------------------------------------------- #
+class TestSessionLogInTheBatchFolder(TempTreeTestCase):
+    """GTReview.log, and GTReview.log.1 once it rotated, sit in the loaded folder.
+
+    The panel attaches its log to the folder it just discovered, so the next
+    load of that folder finds the log files next to the cases, or next to the
+    volumes themselves when the folder is a single case.  They must change
+    nothing about what is discovered.
+    """
+
+    LOG_NAMES = ("GTReview.log", "GTReview.log.1")
+
+    def _add_logs(self, folder):
+        for name in self.LOG_NAMES:
+            touch(os.path.join(folder, name), b"2026-09-14 10:00:00 INFO GTReview: dataset loaded\n")
+
+    def test_batch_folder_discovers_the_same_cases(self):
+        make_case(self.root, "YG_L_2", ["t1c", "seg"])
+        make_case(self.root, "YG_L_10", ["t1c", "pred_seg", "reviewed_seg"])
+        without = discover_cases(self.root)
+        self._add_logs(self.root)
+        with_logs = discover_cases(self.root)
+        self.assertEqual(iter_case_ids(with_logs), ["YG_L_2", "YG_L_10"])
+        self.assertEqual(with_logs, without)
+
+    def test_single_case_folder_discovers_the_same_case(self):
+        case_dir = make_case(self.root, "YG_L_3", ["t1c", "seg", "pred_seg"])
+        without = discover_cases(case_dir)
+        self._add_logs(case_dir)
+        with_logs = discover_cases(case_dir)
+        self.assertEqual(iter_case_ids(with_logs), ["YG_L_3"])
+        self.assertEqual(with_logs, without)
+
+    def test_drive_root_keeps_its_case_id(self):
+        for stem in ("YG_L_4_t1c", "YG_L_4_seg"):
+            touch(os.path.join(self.root, stem + ".nii.gz"))
+        with nameless_directory(self.root):
+            without = discover_cases(self.root)
+            self._add_logs(self.root)
+            with_logs = discover_cases(self.root)
+        self.assertEqual(iter_case_ids(with_logs), ["YG_L_4"])
+        self.assertEqual(with_logs, without)
+
+    def test_a_folder_holding_only_the_logs_is_not_a_case(self):
+        self._add_logs(self.root)
+        self.assertEqual(discover_cases(self.root), [])
+
+
+# --------------------------------------------------------------------------- #
+# a folder path typed in another letter case (NTFS, APFS)
+# --------------------------------------------------------------------------- #
+@unittest.skipUnless(os.name == "posix", "the simulated lookup splits POSIX paths")
+class TestLetterCaseOfTypedPaths(TempTreeTestCase):
+    def test_typed_single_case_folder_takes_the_case_id_from_the_disk(self):
+        make_case(self.root, "YG_ABC_1", ["t1c", "seg", "pred_seg"])
+        typed = os.path.join(self.root, "yg_abc_1")
+        with case_insensitive_disk():
+            case = parse_case_files(typed)
+            default = case.default_mask_path()
+        self.assertEqual(case.case_id, "YG_ABC_1")
+        self.assertEqual(set(case.images), {"t1c"})
+        self.assertEqual(set(case.masks), {"seg", "pred_seg"})
+        # typed in lower case this used to fall through to pred_seg
+        self.assertEqual(default, case.masks["seg"])
+        self.assertEqual(os.path.basename(case.reviewed_path), "YG_ABC_1_reviewed_seg.nii.gz")
+
+    def test_typed_single_case_folder_as_the_discovery_root(self):
+        make_case(self.root, "YG_ABC_1", ["t1c", "seg", "pred_seg"])
+        with case_insensitive_disk():
+            cases = discover_cases(os.path.join(self.root, "yg_abc_1"))
+            default = cases[0].default_mask_path()
+        self.assertEqual(iter_case_ids(cases), ["YG_ABC_1"])
+        self.assertEqual(default, cases[0].masks["seg"])
+
+    def test_typed_batch_folder_lists_case_ids_as_on_disk(self):
+        batch = os.path.join(self.root, "batch_01")
+        make_case(batch, "YG_A_1", ["t1c", "seg", "pred_seg"])
+        make_case(batch, "YG_A_2", ["t1c", "pred_seg"])
+        with case_insensitive_disk():
+            cases = discover_cases(os.path.join(self.root, "BATCH_01"))
+        self.assertEqual(iter_case_ids(cases), ["YG_A_1", "YG_A_2"])
+        self.assertEqual(set(cases[0].masks), {"seg", "pred_seg"})
+
+    def test_files_without_the_prefix_take_the_on_disk_folder_name(self):
+        make_case(self.root, "YG_ABC_2", ["t1c", "seg"], prefix="")
+        with case_insensitive_disk():
+            case = parse_case_files(os.path.join(self.root, "yg_abc_2"))
+        self.assertEqual(case.case_id, "YG_ABC_2")
+        self.assertEqual(set(case.masks), {"seg"})
+        self.assertEqual(os.path.basename(case.reviewed_path), "YG_ABC_2_reviewed_seg.nii.gz")
+
+    def test_review_saved_through_the_typed_path_is_found_again(self):
+        on_disk = make_case(self.root, "YG_ABC_3", ["t1c", "seg"])
+        typed = os.path.join(self.root, "yg_abc_3")
+        with case_insensitive_disk():
+            first = parse_case_files(typed)
+        # open() does not go through the simulated lookup; write where the
+        # case-insensitive disk would have put it
+        touch(os.path.join(on_disk, os.path.basename(first.reviewed_path)))
+        with case_insensitive_disk():
+            second = parse_case_files(typed)
+            reviewed = second.is_reviewed
+        self.assertTrue(reviewed)
+        self.assertEqual(set(second.masks), {"seg"})
+        self.assertEqual(second.case_id, first.case_id)
+
+    def test_unlistable_parent_falls_back_to_the_file_prefix(self):
+        make_case(self.root, "YG_ABC_4", ["t1c", "seg", "pred_seg"])
+        with case_insensitive_disk(unlistable=[self.root]):
+            case = parse_case_files(os.path.join(self.root, "yg_abc_4"))
+            default = case.default_mask_path()
+        self.assertEqual(case.case_id, "YG_ABC_4")
+        self.assertEqual(default, case.masks["seg"])
+
+    def test_folder_renamed_in_another_case_follows_its_files(self):
+        # no simulation: the folder really is lower case, its files are not
+        make_case(self.root, "yg_abc_5", ["t1c", "seg", "pred_seg"], prefix="YG_ABC_5")
+        case = parse_case_files(os.path.join(self.root, "yg_abc_5"))
+        self.assertEqual(case.case_id, "YG_ABC_5")
+        self.assertEqual(set(case.masks), {"seg", "pred_seg"})
+        self.assertEqual(case.default_mask_path(), case.masks["seg"])
+        self.assertEqual(os.path.basename(case.reviewed_path), "YG_ABC_5_reviewed_seg.nii.gz")
+        self.assertEqual(iter_case_ids(discover_cases(self.root)), ["YG_ABC_5"])
+
+    def test_most_common_file_spelling_wins(self):
+        case_dir = make_case(self.root, "yg_q_1", ["t1c", "seg"], prefix="YG_Q_1")
+        touch(os.path.join(case_dir, "Yg_Q_1_pred_seg.nii.gz"))
+        case = parse_case_files(case_dir)
+        self.assertEqual(case.case_id, "YG_Q_1")
+        self.assertEqual(set(case.masks), {"seg", "Yg_Q_1_pred_seg"})
+
+    def test_exact_prefix_wins_on_a_case_sensitive_disk(self):
+        case_dir = make_case(self.root, "c1", ["seg"])
+        touch(os.path.join(case_dir, "C1_seg.nii.gz"))
+        if len(os.listdir(case_dir)) < 2:
+            self.skipTest("this disk folds letter case")
+        case = parse_case_files(case_dir)
+        self.assertEqual(case.case_id, "c1")
+        self.assertEqual(set(case.masks), {"seg", "C1_seg"})
+        self.assertEqual(case.default_mask_path(), case.masks["seg"])
+
+
+# --------------------------------------------------------------------------- #
+# a drive root holding one case's files
+# --------------------------------------------------------------------------- #
+class TestDriveRoot(TempTreeTestCase):
+    def test_windows_roots_have_no_last_component(self):
+        # the premise nameless_directory simulates, on the real path modules
+        self.assertEqual(ntpath.basename("Z:\\".rstrip("\\")), "")
+        self.assertEqual(ntpath.basename("\\\\server\\share\\".rstrip("\\")), "")
+        self.assertEqual(posixpath.basename("/".rstrip("/")), "")
+
+    def _touch_root(self, *stems):
+        for stem in stems:
+            touch(os.path.join(self.root, stem + ".nii.gz"))
+
+    def test_case_id_comes_from_the_file_prefix(self):
+        self._touch_root("YG_R_7_t1c", "YG_R_7_seg", "YG_R_7_pred_seg")
+        with nameless_directory(self.root):
+            case = parse_case_files(self.root)
+        self.assertEqual(case.case_id, "YG_R_7")
+        self.assertEqual(set(case.images), {"t1c"})
+        self.assertEqual(set(case.masks), {"seg", "pred_seg"})
+        self.assertEqual(case.reviewed_path,
+                         os.path.join(os.path.abspath(self.root), "YG_R_7_reviewed_seg.nii.gz"))
+        self.assertEqual(case.default_mask_path(), case.masks["seg"])
+
+    def test_discovery_of_a_drive_root(self):
+        self._touch_root("YG_R_7_t1c", "YG_R_7_pred_seg")
+        with nameless_directory(self.root):
+            cases = discover_cases(self.root)
+        self.assertEqual(iter_case_ids(cases), ["YG_R_7"])
+        self.assertEqual(set(cases[0].masks), {"pred_seg"})
+
+    def test_stray_volumes_do_not_outvote_the_case(self):
+        self._touch_root("YG_R_7_t1c", "YG_R_7_seg", "YG_R_7_pred_seg",
+                         "template", "mni_atlas", "T1_brain")
+        with nameless_directory(self.root):
+            case = parse_case_files(self.root)
+        self.assertEqual(case.case_id, "YG_R_7")
+        self.assertEqual(case.default_mask_path(), case.masks["seg"])
+
+    def test_review_round_trip_keeps_the_case_id(self):
+        self._touch_root("YG_R_8_t1c", "YG_R_8_pred_seg")
+        with nameless_directory(self.root):
+            first = parse_case_files(self.root)
+            touch(first.reviewed_path)
+            second = parse_case_files(self.root)
+        self.assertEqual(second.case_id, first.case_id)
+        self.assertTrue(second.is_reviewed)
+        self.assertEqual(set(second.masks), {"pred_seg"})
+        self.assertEqual(second.default_mask_path(), second.reviewed_path)
+
+    def test_single_file_round_trip_keeps_the_case_id(self):
+        # one file gives no second stem to agree with; whatever id it yields
+        # must survive the review written under it
+        self._touch_root("YG_R_9_pred_seg")
+        with nameless_directory(self.root):
+            first = parse_case_files(self.root)
+            touch(first.reviewed_path)
+            second = parse_case_files(self.root)
+        self.assertEqual(second.case_id, first.case_id)
+        self.assertTrue(second.is_reviewed)
+
+    def test_files_without_a_shared_prefix_still_get_a_usable_id(self):
+        self._touch_root("t1c", "seg")
+        with nameless_directory(self.root):
+            first = parse_case_files(self.root)
+            touch(first.reviewed_path)
+            second = parse_case_files(self.root)
+        self.assertTrue(first.case_id)
+        self.assertNotIn(os.sep, first.case_id)
+        self.assertFalse(os.path.basename(first.reviewed_path).startswith("_"))
+        self.assertEqual(second.case_id, first.case_id)
+        self.assertTrue(second.is_reviewed)
+        self.assertEqual(set(second.masks), {"seg"})
+
+
+# --------------------------------------------------------------------------- #
+# a root the process is refused
+# --------------------------------------------------------------------------- #
+class TestPermissionDenied(TempTreeTestCase):
+    def test_refused_listing_of_the_root_raises(self):
+        make_case(self.root, "K1", ["t1c", "seg"])
+        with refused("scandir", self.root), self.assertRaises(PermissionError):
+            discover_cases(self.root)
+
+    def test_refused_listing_of_a_single_case_root_raises(self):
+        # the sub-dir scan finds nothing, and the root's own files must then be
+        # listed strictly rather than parsed into "0 cases found"
+        case_dir = make_case(self.root, "K2", ["t1c", "seg"])
+        with refused("listdir", case_dir), self.assertRaises(PermissionError):
+            discover_cases(case_dir)
+
+    def test_root_that_cannot_be_looked_at_raises(self):
+        # isdir() answers False without saying why; the stat behind it does.
+        # On Windows isdir asks the system itself and never calls os.stat, so
+        # its answer for the refused path is patched in as well.
+        batch = os.path.abspath(os.path.join(self.root, "batch"))
+        make_case(batch, "K3", ["t1c", "seg"])
+        real_isdir = os.path.isdir
+
+        def isdir(path):
+            if isinstance(path, str) and os.path.abspath(path) == batch:
+                return False
+            return real_isdir(path)
+
+        with refused("stat", batch), mock.patch("os.path.isdir", isdir), \
+                self.assertRaises(PermissionError):
+            discover_cases(batch)
+
+    @unittest.skipIf(CHMOD_CANNOT_LOCK, "chmod cannot lock a directory for root or on Windows")
+    def test_root_under_a_locked_parent_raises(self):
+        locked = os.path.join(self.root, "locked")
+        make_case(os.path.join(locked, "batch"), "K4", ["t1c", "seg"])
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o755)
+        with self.assertRaises(PermissionError):
+            discover_cases(os.path.join(locked, "batch"))
+
+    def test_unreadable_sub_folder_is_skipped(self):
+        make_case(self.root, "K5", ["t1c", "seg"])
+        locked = make_case(self.root, "K6", ["t1c", "seg"])
+        with refused("listdir", locked):
+            cases = discover_cases(self.root)
+        self.assertEqual(iter_case_ids(cases), ["K5"])
+
+    @unittest.skipIf(CHMOD_CANNOT_LOCK, "chmod cannot lock a directory for root or on Windows")
+    def test_chmod_locked_sub_folder_is_skipped(self):
+        make_case(self.root, "K7", ["t1c", "seg"])
+        locked = make_case(self.root, "K8", ["t1c", "seg"])
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o755)
+        self.assertEqual(iter_case_ids(discover_cases(self.root)), ["K7"])
+
+    def test_root_that_vanished_is_still_just_empty(self):
+        make_case(self.root, "K9", ["t1c", "seg"])
+        gone = FileNotFoundError(errno.ENOENT, "No such file or directory", self.root)
+        with refused("scandir", self.root, error=gone):
+            self.assertEqual(discover_cases(self.root), [])
+
+    def test_parse_case_files_on_its_own_stays_lenient(self):
+        case_dir = make_case(self.root, "K10", ["t1c", "seg"])
+        with refused("listdir", case_dir):
+            case = parse_case_files(case_dir)
+        self.assertEqual(case.case_id, "K10")
+        self.assertEqual((case.images, case.masks), ({}, {}))
 
 
 if __name__ == "__main__":

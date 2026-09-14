@@ -10,14 +10,15 @@ and write the result to a new `_reviewed_seg.nii.gz` beside the source data.
 
 - **Category:** Segmentation
 - **Module name:** GTReview
-- **Requires:** 3D Slicer 5.10
+- **Requires:** 3D Slicer 5.12 Stable, 5.12.4 recommended (the macOS package
+  serves 5.12.3 and 5.12.4 only; Linux also has a package for 5.10)
 - **License:** Apache License 2.0
 
 ---
 
 ## Guide for reviewers
 
-`Docs/tutorial.html` is the short version with screenshots: install Slicer 5.10,
+`Docs/tutorial.html` is the short version with screenshots: install Slicer 5.12,
 install the package, open the module, and what each box of the panel is for.
 Start there.
 
@@ -93,6 +94,9 @@ from a share.
   does not reach it, so it names the file and asks first.
 - **Save** — `Save & next case` at the bottom of the Editing section writes the reviewed mask and opens the next case; `Ctrl+S` saves without moving on. Both stay disabled until every lesion in the list is ticked *Done*.
 - **Keyboard shortcuts** for the whole review loop (see below).
+- **A log beside the data** — `GTReview.log` in the loaded batch directory
+  records what GTReview did and what went wrong, ready to send with a problem
+  report (see *Log file* below).
 
 Pure logic — case discovery, connected components, NIfTI geometry-preserving
 read/write — lives in `GTReviewLib/` with **no Slicer imports**, so it is unit
@@ -107,9 +111,9 @@ once per shell:
 
 ```bash
 export GTREVIEW=/path/to/this/repository      # the directory holding this README
-export SLICER=/path/to/Slicer-5.10.0-linux-amd64
+export SLICER=/path/to/Slicer-5.12.4-linux-amd64
 # macOS: SLICER=/Applications/Slicer.app/Contents  (the launcher is MacOS/Slicer)
-# Windows: use Git Bash or WSL, SLICER=/c/Users/you/AppData/Local/NA-MIC/Slicer\ 5.10.0
+# Windows: use Git Bash or WSL, SLICER=/c/Users/you/AppData/Local/slicer.org/Slicer\ 5.12.4
 ```
 
 ### Developer path (no build — recommended for this repository)
@@ -144,7 +148,7 @@ Notes:
 
 - The setting is stored in the **revision-specific** settings file
   (`slicer.app.revisionUserSettings()`, e.g.
-  `<SlicerHome>/slicer.org/Slicer-34045.ini`, key `[Modules] AdditionalPaths`),
+  `<SlicerHome>/slicer.org/Slicer-34645.ini` for 5.12.4, key `[Modules] AdditionalPaths`),
   **not** in `~/.config/slicer.org/Slicer.ini`. Editing the latter has no
   effect. Changing the setting requires a restart.
 - When Slicer's scripted-module factory registers the module it appends the
@@ -159,19 +163,65 @@ Notes:
 ### Install from a local package (no build tree)
 
 `Packaging/make_package.sh` builds an archive the Extensions Manager accepts
-through **Install from file**, straight from the source tree:
+through **Install from file**, straight from the source tree.
 
-A prebuilt archive is already committed in [`Packages/`](Packages/) — install
-that one and you need none of this. To build your own:
+Prebuilt archives are already committed in [`Packages/`](Packages/) — install
+the one that matches your Slicer and you need none of the build below. Use the
+Stable Slicer 5.12, preferably 5.12.4, not a Preview:
+
+| Your Slicer | Archive in `Packages/` |
+| --- | --- |
+| 5.12.x on Linux | `GTReview-for-Slicer-5.12-linux-amd64-….tar.gz` |
+| 5.12.x on Windows | `GTReview-for-Slicer-5.12-win-amd64-….zip` |
+| 5.12.3 or 5.12.4 on macOS, no other release | `GTReview-for-Slicer-5.12.3-and-5.12.4-macosx-amd64-….tar.gz` |
+| 5.10.x on Linux | `GTReview-for-Slicer-5.10-linux-amd64-….tar.gz` |
+
+Fetch it with `git clone`, with the **Download raw file** button on the file's
+page on GitHub, or with `curl` and the raw form of its link, the archive's full
+name in place of `<file>`. The packages are published on `main`, and the raw
+form matters: the ordinary `blob/` link returns GitHub's web page about the
+file, which Slicer cannot install.
+
+```bash
+curl -LO https://github.com/melandur/SlicerGTReview/raw/main/Packages/<file>
+```
+
+On a Mac do not download it with Safari, which may unpack a `.tar.gz` as soon
+as it arrives; **Install from file** needs the archive itself.
+
+Then in Slicer: **View → Extensions Manager → Install from file**, pick the
+archive, restart. *GT Review* appears under **Segmentation**. What stops it
+from appearing:
+
+- **macOS, Slicer run from the DMG:** Slicer installs extensions inside
+  `Slicer.app` itself, which is read-only on the disk image. Drag `Slicer.app`
+  to `/Applications` or `~/Applications` and always launch it from there.
+- **A Preview build:** a 5.12 archive does not load on the 5.13 Preview. On
+  Linux and Windows it even installs without an error, but the module lives
+  under `lib/Slicer-5.12/qt-scripted-modules` and Preview never looks there.
+  Install the Stable release.
+- **Slicer installed by IT under `Program Files`:** Slicer installs extensions
+  into `slicer.org\Extensions-<revision>` inside its own folder, where a normal
+  account cannot write. Pointing *Extensions installation path* elsewhere is no
+  way round it: Slicer saves that setting in the same `slicer.org` folder
+  (`Slicer-<revision>.ini`), so it cannot be saved either. Install Slicer per
+  user instead, as its installer does by default (under
+  `AppData\Local\slicer.org`), or ask IT to grant you write access to
+  `<Slicer folder>\slicer.org`; then install the package.
+- **Listed as installed, but no module:** an extraction that fails part way
+  (antivirus holding a file, for instance) is only logged, and the extension is
+  recorded as installed anyway. Uninstall it under **Manage Extensions**,
+  restart Slicer, and install again. On Linux and Windows an archive for another
+  Slicer version ends the same way; [`Packages/README.md`](Packages/README.md)
+  has the details of the file names.
+
+To build your own:
 
 ```bash
 Packaging/make_package.sh --slicer $SLICER                 # this machine
 Packaging/make_package.sh --slicer $SLICER --os win        # for a Windows user
-Packaging/make_package.sh --slicer $SLICER --os macosx --revision 34045
+Packaging/make_package.sh --slicer $SLICER --os macosx --revision 34627,34645
 ```
-
-Then in Slicer: **View → Extensions Manager → Install from file**, pick the
-`.tar.gz`, restart. *GT Review* appears under **Segmentation**.
 
 `--os` defaults to whatever the `--slicer` installation is, so the plain form
 builds for the machine you are on. The layout differs per platform: macOS
@@ -220,9 +270,16 @@ Installed layout (identical in shape to the source tree, which is why the icon
 and resource lookups work in both):
 
 ```
-<SlicerHome>/slicer.org/Extensions-<rev>/GTReview/lib/Slicer-5.10/qt-scripted-modules/
+<SlicerHome>/slicer.org/Extensions-<rev>/GTReview/lib/Slicer-5.12/qt-scripted-modules/
   GTReview.py
-  GTReviewLib/{__init__,dataset,lesions,maskio}.py
+  GTReviewLib/__init__.py
+  GTReviewLib/dataset.py
+  GTReviewLib/layouts.py
+  GTReviewLib/lesions.py
+  GTReviewLib/maskio.py
+  GTReviewLib/SegmentEditorSphereThresholdEffect.py
+  GTReviewLib/sessionlog.py
+  GTReviewLib/undobudget.py
   Resources/Icons/GTReview.png
 ```
 
@@ -249,19 +306,39 @@ and resource lookups work in both):
 - Any sub-directory holding at least one `.nii` / `.nii.gz` becomes a case, and
   the **directory name is the case id**. Both `YG_78CQZ7VA3H2G_27` and
   `P39_2023-11-09` styles work; nothing about the id format is hard-coded.
+- The case id follows the letter case of the files. Windows and macOS disks
+  ignore letter case, so a folder reached as `yg_78cqz7va3h2g_27` that holds
+  `YG_78CQZ7VA3H2G_27_seg.nii.gz` is the case `YG_78CQZ7VA3H2G_27`, and its
+  review is saved under that spelling, next to the files.
 - If the chosen root itself holds NIfTIs and contains no such sub-directory, the
-  root is treated as a single case.
+  root is treated as a single case. A drive root such as `Z:\` has no folder
+  name to take the id from, so it takes the prefix its files share, cut at an
+  underscore: `YG_R_7_t1c.nii.gz` and `YG_R_7_seg.nii.gz` make the case
+  `YG_R_7`.
+- Copies are skipped, so a duplicate never shows up as an extra image or mask:
+  Explorer's `… - Copy` and `… - Copy (2)`, numbered duplicates such as
+  `seg (1).nii.gz`, Dropbox `conflicted copy` files, dotfiles and `~$` lock
+  files.
+- A folder Slicer may not read (macOS privacy protection over Desktop,
+  Documents and Downloads, or a Windows ACL) is reported as denied, not as
+  0 cases.
 - For a file `<stem>.nii.gz` in a case directory the **key** is
   `stem[len(case_id) + 1:]` when the stem starts with `<case_id>_`, else the
   whole stem. Keys are classified case-insensitively, first match wins:
 
   | key | classified as |
   | --- | --- |
-  | `reviewed_seg` | the review output — never offered as an input mask |
+  | holds `reviewed_seg` as whole words: at the start of the key or right after an `_`, at its end or right before an `_`, and not right after `not_` or `non_` (`reviewed_seg`, `reviewed_seg_v2`, `old_reviewed_seg`, `t1c_reviewed_seg_2`, `Reviewed_Seg_Backup`) | a review — never offered as an image or as an input mask |
   | equals or ends with `seg`, `mask`, `label`, `labels`, `gt` | mask |
   | anything else | image sequence |
 
-  So `pred_seg` is a mask, `t1c` is an image sequence.
+  So `pred_seg` is a mask and `t1c` is an image sequence. `unreviewed_seg`,
+  `prereviewed_seg`, `not_reviewed_seg` and `non_reviewed_seg` are masks as
+  well, still waiting for a review: in the first two `reviewed_seg` is part of
+  a longer word, in the last two it is negated. `reviewed_segmentation` is not
+  a review either, since `reviewed_seg` does not end a word there; it is an
+  image sequence. Only `<case_id>_reviewed_seg.nii.gz` is the case's review; an
+  older review kept under a longer name is left out altogether.
 - Any number of sequences may be present simultaneously or alone.
 - Volumes in a case normally share geometry, but this is verified against the
   chosen reference rather than assumed.
@@ -276,8 +353,9 @@ Saving writes:
 <case_dir>/<case_id>_reviewed_seg.nii.gz
 ```
 
-- **Original files are opened read-only and are never overwritten.** The only
-  file GTReview ever writes is `_reviewed_seg.nii.gz`.
+- **Original files are opened read-only and are never overwritten.** GTReview
+  writes only `_reviewed_seg.nii.gz` into a case directory, and its log,
+  `GTReview.log`, into the batch directory (see *Log file*).
 - If `_reviewed_seg.nii.gz` already exists it is loaded as the starting mask, so
   a review can be resumed, and is overwritten on save after a confirmation
   prompt.
@@ -290,10 +368,85 @@ Saving writes:
 
 ---
 
+## Log file
+
+GTReview keeps a log of its own, `GTReview.log`, in the batch directory loaded
+in the Dataset section (that folder itself, not a case directory), so it stays
+with the data and can be sent as it is when something goes wrong.
+
+- **When it is written.** The file is created once *Browse & load* finds at
+  least one case there, and every later session that loads the folder appends
+  to it. What GTReview logged earlier in the session, since the panel was first
+  opened, is kept in memory (up to a limit) and written then. A folder where no
+  case is found, or one Slicer may not read, never gets a log file. When the
+  folder cannot be written, a read-only share for instance, the cases load
+  anyway, without a log, and a warning goes to Slicer's own log.
+- **While it is open.** The file stays open as long as the batch is loaded. It
+  is closed when another batch is loaded, when a load finds no case and empties
+  the case list, and when Slicer closes. A folder Slicer may not read leaves the
+  loaded batch, and its log, as they were. **On Windows** a folder holding an
+  open file cannot be moved, renamed or deleted, so close Slicer or load another
+  batch before moving, renaming or deleting the batch directory.
+- **What it holds.**
+  - A header at the start of each session: the time, platform and Python
+    version, the GTReview build, the Slicer version and revision, the path of
+    Slicer's own log file, the Qt, numpy and SimpleITK versions, the batch
+    directory and the number of cases found, the undo memory budget and maximum
+    undo states, the brush size, whether Live fill is on, and `Crash reports:
+    on`, or `Crash reports: off (Windows)` on Windows. The build of an installed
+    package reads like `v0.2.0-27-g3768dbb-dirty (3768dbb6…)`: the `git
+    describe` string it was built from, where `-dirty` means the tree held
+    uncommitted changes, then the full commit. A copy run from a clone reads
+    `source tree <folder>`.
+  - GTReview's own messages: dataset and case loads, saves, deleted reviews,
+    case resets, lesion and label deletes, relabelled and newly adopted
+    lesions, Undo and Redo presses, and every warning and error with its
+    traceback.
+  - Warnings and errors reported by Slicer, VTK and Qt. A run of identical
+    entries is written once, followed by `... repeated N more times`. They are
+    copied when Slicer's event loop runs again, so one can appear after
+    GTReview lines logged later than it.
+  - Any uncaught error raised in GTReview's code, with its traceback.
+  - The Python stack of every thread if Slicer crashes. Not on Windows: crash
+    reports are off there, because Windows also reports errors that Slicer
+    handles and survives (the file dialog raises one) as fatal, which would
+    fill the log with crashes that never happened.
+  - Where Slicer's main thread is stuck when it has not got back to the event
+    loop for 15 seconds: a `Timeout (0:00:15)!` line and the stack of every
+    thread, repeated every 15 seconds while it stays stuck. That is Slicer's
+    main thread, not always GTReview: another module's work, a slow repaint,
+    macOS App Nap holding back a Slicer left in the background, or the computer
+    waking from sleep can leave one, as can an operation that is merely slow,
+    loading a very large case for instance. The block carries no time stamp of
+    its own; it belongs to the time of the lines around it.
+  - Crash and freeze reports start only once a batch with cases is loaded. If
+    Slicer crashes before that, what was kept in memory is lost with it.
+- **Size.** The log moves only when a session starts: once it has reached 5 MB,
+  it is renamed to `GTReview.log.1`, replacing an older one, and a new
+  `GTReview.log` begins. Within a session, once Slicer's warnings would take the
+  file past 5 MB, they stop being copied, with one line saying so; Slicer's own
+  log, named in the header, still has them. GTReview's own lines and uncaught
+  errors keep being written.
+- **Privacy.** The log holds folder and file paths, which can include your user
+  name, and case ids; no image data. Warnings from anything else open in Slicer
+  during the session, another module or an unrelated file, can appear in it
+  too. GTReview never sends it anywhere, but a shared or synced batch directory
+  carries it along like any other file.
+
+**With a problem report**, send `GTReview.log`, `GTReview.log.1` if there is
+one, and Slicer's own log named in the header. Slicer writes a new log file
+every time it runs, so take the one named in the header of the session where
+the problem happened, the last header above the error, rather than the newest.
+
+---
+
 ## Keyboard shortcuts
 
 Active while the GTReview module is the current module. They are suppressed
 while a text field has focus, so typing in a line edit never triggers them.
+
+On macOS every `Ctrl` shortcut in this README is the Command key (`Cmd+S`,
+`Cmd+Z`, …), and `Del` is the key labelled *delete* (⌫); fn+delete works too.
 
 | Shortcut | Action |
 | --- | --- |
@@ -339,12 +492,33 @@ $SLICER/Slicer --no-main-window \
     --python-script $GTREVIEW/Testing/smoke_headless.py
 ```
 
-The integration test drives the module itself: it builds a synthetic case in a
-temp directory, then loads it, paints with real mouse events on a slice view,
+The integration test drives the module itself: it builds synthetic cases in a
+temp directory, then loads them, paints with real mouse events on a slice view,
 checks that one Undo press reverts the whole stroke, that Sphere threshold with
 **2D** ticked stays inside the drawn slice, and that the per-row lesion delete
-and *Delete review* behave. It needs the module on the path, and is named
-without a `test_` prefix so the `discover` run above leaves it alone:
+and *Delete review* behave. It also checks:
+
+- **shortcut labels:** tooltips, prompts, the pinned footer and a row's delete
+  button name their keys through `shortcutText`, the platform's own spelling
+  (`⌘Z` on a Mac). On Linux that spelling reads exactly like a hand-written
+  `Ctrl+Z`, so the test swaps `shortcutText` for a marker and looks for the
+  marker in labels built on demand. The Mac delete key (Backspace) is bound
+  only when the platform flag says macOS, and leaves a focused text box alone;
+- **a denied folder:** discovery raising `PermissionError` is reported as
+  *Slicer was denied access*, with the macOS privacy hint only on a Mac, rather
+  than as 0 cases, and the open case stays open;
+- **the batch-directory history** lists a folder once however it was spelled,
+  Windows spellings included;
+- **the theme:** switching the application palette between light and dark
+  re-tints the sections and redraws the icons;
+- **a failed save before a scene close** is shown to the reviewer, naming the
+  case and saying its edits are lost;
+- **the log:** loading the batch writes `GTReview.log` into it, opened by the
+  session header and holding GTReview's own lines, while a folder where no case
+  is found gets no log file.
+
+It needs the module on the path, and is named without a `test_` prefix so the
+`discover` run above leaves it alone:
 
 ```bash
 $SLICER/Slicer --no-splash \
@@ -410,9 +584,11 @@ short version:
    they live only in the top-level `CMakeLists.txt`. Prefer a branch name over a
    commit hash for `scm_revision`. New submissions use `"tier": 1`.
 
-5. **Open the pull request against the right branch.** The `5.10` branch feeds
-   the Slicer 5.10 stable release; `main` feeds Preview builds. Target `5.10`
-   (and `main` if you also want Preview coverage). The `5.10` branch uses schema
+5. **Open the pull request against the right branch.** Each stable release has
+   a branch of its own: `5.12` feeds the Slicer 5.12 stable release, `5.10`
+   only Slicer 5.10, and `main` feeds Preview builds. Target `5.12`, the release
+   the packages here are built for (add `5.10` for Slicer 5.10 users, `main` if
+   you also want Preview coverage). The `5.12` branch, like `5.10`, uses schema
    **v1.0.1**, which is the one that adds the `tier` field. Fill in the PR
    checklist that the template presents.
 

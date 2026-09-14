@@ -311,7 +311,8 @@
         <h2>Dataset</h2>
       </div>
       <p class="sec-sub">Points the tool at a batch of cases and decides which mask you are correcting.
-        Nothing here writes to disk except <em>Delete review</em>.</p>
+        Nothing here changes a mask on disk except <em>Delete review</em>; loading a batch only adds
+        GTReview's log file to it.</p>
 
       <div class="controls">
         <div class="ctl">
@@ -320,6 +321,31 @@
             <p>The folder that <em>contains</em> the case folders — one level deep, so point at
               <code>batch_01</code>, not at its parent and not at a single case.</p>
             <p>The dropdown remembers the last ten batch directories you opened.</p>
+            <p>Once cases are found in it, GTReview writes its log into this folder as
+              <code>GTReview.log</code>, adding to it every session. Each session opens with a header
+              naming the GTReview build, the Slicer version and the path of Slicer's own log. Then it
+              holds:</p>
+            <ul>
+              <li>GTReview's messages and errors with their tracebacks, and any uncaught error in
+                GTReview's code;</li>
+              <li>warnings and errors from Slicer, VTK and Qt, a run of identical ones written once with a
+                count. They are copied when Slicer's event loop runs again, so one can appear after
+                GTReview lines logged later, and warnings from anything else open in Slicer can appear
+                too;</li>
+              <li>the Python stack if Slicer crashes, except on Windows, where crash reports are off;</li>
+              <li>a <code>Timeout (0:00:15)!</code> block with the stacks when Slicer's main thread stays
+                busy for 15 seconds. It shows where Slicer was stuck, which is not always GTReview (another
+                module, a slow repaint, App Nap, waking from sleep), and has no time stamp: it belongs to
+                the time of the lines around it.</li>
+            </ul>
+            <p>Crash and freeze reports start only once a batch with cases is loaded; what was logged
+              before waits in memory and is lost if Slicer crashes first. The log moves to
+              <code>GTReview.log.1</code> only when a session starts past 5&nbsp;MB; within a session,
+              past 5&nbsp;MB, Slicer's warnings stop being copied. It holds folder paths and case ids and
+              is never sent anywhere; when something goes wrong, send it, <code>GTReview.log.1</code> if
+              there is one, and the Slicer log its header names.</p>
+            <p>The file stays open while the batch is loaded. On Windows that keeps the folder from being
+              moved, renamed or deleted: close Slicer or load another batch first.</p>
           </div>
         </div>
 
@@ -687,6 +713,12 @@
       <p style="margin-top: .9rem; color: var(--ink-mute); font-size: .92rem;">
         These six are also pinned at the foot of the module panel, so you never have to leave
         Slicer to look them up.</p>
+      <p style="margin-top: .5rem; color: var(--ink-mute); font-size: .92rem;">
+        On a Mac, press <span class="k">⌘</span> Command wherever these tables say Ctrl
+        (<span class="k">⌘Z</span>, <span class="k">⌘S</span>, <span class="k">⇧⌘Z</span>), the delete key
+        <span class="k">⌫</span> for Del (fn+delete works too), and <span class="k">⌘+wheel</span> to zoom.
+        <span class="k">Esc</span> stays Esc. The panel's own footer writes the keys the Mac way, with
+        <span class="k">⇧</span> for Shift.</p>
     </section>
   </main>
 

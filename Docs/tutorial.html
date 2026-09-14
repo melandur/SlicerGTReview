@@ -54,6 +54,9 @@
   figcaption { color: var(--ink-mute); font-size: 0.9rem; margin-top: 8px; }
   .note { border-left: 4px solid var(--accent); background: var(--surface); padding: 10px 14px;
           border-radius: 0 8px 8px 0; margin: 12px 0; }
+  .note ul { margin-bottom: 2px; }
+  /* A long link breaks where it must instead of pushing a phone screen sideways. */
+  code.url { overflow-wrap: anywhere; }
   .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
   @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
   table.keys { border-collapse: collapse; margin: 8px 0 4px; }
@@ -78,38 +81,66 @@
     <a href="#open">3 · Open it</a>
     <a href="#use">4 · Review a case</a>
     <a href="#keys">Keys</a>
+    <a href="#problems">If something goes wrong</a>
   </nav>
 
   <section id="slicer">
-    <h2><span class="step">1</span>Install 3D Slicer 5.10</h2>
-    <p>Download the <b>5.10.x</b> release for your platform from
-      <a href="https://download.slicer.org/">download.slicer.org</a> and install it like any other application.</p>
+    <h2><span class="step">1</span>Install 3D Slicer 5.12</h2>
+    <p>Download the <b>Stable</b> release, <b>5.12.4</b>, for your platform from
+      <a href="https://download.slicer.org/">download.slicer.org</a> (not the Preview) and install it like any other application.</p>
     <div class="note">
-      The plugin package is built for <b>Slicer 5.10</b>. A different major.minor version (5.8, 5.11, …) will not
-      load it from the package, so check <i>Help → About 3D Slicer</i> if you already have Slicer installed.
+      The plugin packages are built for <b>Slicer 5.12</b>: any 5.12.x on Linux and Windows, exactly 5.12.3 or 5.12.4 on macOS.
+      Linux also has one for Slicer 5.10. Any other version, the 5.13 Preview included, will not show the module,
+      so check <i>Help → About 3D Slicer</i> if you already have Slicer installed.
     </div>
     <ul>
       <li><b>Linux</b>: unpack the <code>.tar.gz</code> anywhere and run <code>Slicer</code> inside it.</li>
-      <li><b>Windows</b>: run the installer; Slicer lands under <code>AppData\Local\NA-MIC\Slicer 5.10.0</code>.</li>
-      <li><b>macOS</b>: drag <code>Slicer.app</code> to Applications.</li>
+      <li><b>Windows</b>: run the installer; Slicer lands under <code>AppData\Local\slicer.org\Slicer 5.12.4</code>.
+        If IT installed it under <code>Program Files</code> instead, see the note at the end of step 2.</li>
+      <li><b>macOS</b>: open the <code>.dmg</code>, drag <code>Slicer.app</code> to <code>/Applications</code> or
+        <code>~/Applications</code>, and always launch it from there. Never run it from the DMG: the plugin is installed
+        inside <code>Slicer.app</code>, which is read-only on the disk image.</li>
     </ul>
   </section>
 
   <section id="plugin">
     <h2><span class="step">2</span>Install the plugin</h2>
-    <p>Get the package from the repository's <code>Packages/</code> folder. It is one
-      <code>.tar.gz</code> per Slicer version and platform, named for both, for example
-      <code>GTReview-for-Slicer-5.10-linux-amd64-…tar.gz</code>. Pick the one matching your
-      Slicer version and platform.</p>
+    <p>Get the package from the repository's <code>Packages/</code> folder. There is one archive per Slicer
+      version and platform, named for both. Pick the one matching your Slicer version and platform:</p>
+    <ul>
+      <li><b>Linux</b>, Slicer 5.12.x: <code>GTReview-for-Slicer-5.12-linux-amd64-….tar.gz</code></li>
+      <li><b>Windows</b>, Slicer 5.12.x: <code>GTReview-for-Slicer-5.12-win-amd64-….zip</code></li>
+      <li><b>macOS</b>, Slicer 5.12.3 or 5.12.4: <code>GTReview-for-Slicer-5.12.3-and-5.12.4-macosx-amd64-….tar.gz</code></li>
+      <li><b>Linux</b>, Slicer 5.10: <code>GTReview-for-Slicer-5.10-linux-amd64-….tar.gz</code></li>
+    </ul>
+    <p>Clone the repository (<code>git clone https://github.com/melandur/SlicerGTReview.git</code>), or open the
+      archive's page on GitHub and press <b>Download raw file</b>, or fetch it with
+      <code class="url">curl -LO https://github.com/melandur/SlicerGTReview/raw/main/Packages/&lt;file&gt;</code>,
+      the archive's full name in place of <code>&lt;file&gt;</code>. Use that <code>raw</code> link: the ordinary
+      link to the file is GitHub's web page about it, not the archive. On a Mac do not download it with Safari: it
+      may unpack the <code>.tar.gz</code> as soon as it arrives, and Slicer needs the archive itself.</p>
     <ol>
       <li>In Slicer open <b>View → Extensions Manager</b>.</li>
-      <li>Click <b>Install from file…</b> (top right) and choose the <code>.tar.gz</code>.</li>
+      <li>Click <b>Install from file…</b> (top right) and choose the archive.</li>
       <li>Click <b>Restart</b> when asked.</li>
     </ol>
     <figure>
       <img src="img/install-extensions-manager.png" alt="Extensions Manager toolbar with the Install from file button at the top right">
       <figcaption>Extensions Manager. <i>Install from file…</i> is in the top right; the installed extension appears in this list after the restart.</figcaption>
     </figure>
+    <div class="note">
+      <b>GT Review not in the module list after the restart?</b>
+      <ul>
+        <li><b>A Preview Slicer</b> (5.13) does not load the package, even when it installs without an error. Install the Stable 5.12.</li>
+        <li><b>Slicer installed by IT under <code>Program Files</code></b>: Slicer puts plugins in the
+          <code>slicer.org</code> folder inside its own folder, where a normal account cannot write, and it saves the
+          setting that would move them in that same folder, so changing it does not help. Install Slicer per user
+          instead, as the installer does by default (under <code>AppData\Local\slicer.org</code>), or ask IT to give
+          you write access to <code>&lt;Slicer folder&gt;\slicer.org</code>. Then install the plugin again.</li>
+        <li><b>Listed in the Extensions Manager, but no module</b> (antivirus can interrupt the unpacking): uninstall it
+          under <i>Manage Extensions</i>, restart Slicer, and install it again.</li>
+      </ul>
+    </div>
     <div class="note">
       <b>Working from the source tree instead?</b> <i>Edit → Application Settings → Modules → Additional module paths → Add</i>,
       point it at the folder that contains <code>GTReview.py</code>, restart. No package needed.
@@ -209,10 +240,52 @@
       <tr><td><kbd>a</kbd> / <kbd>d</kbd></td><td>mask more transparent / more opaque</td></tr>
       <tr><td><kbd>s</kbd></td><td>hide / show the mask</td></tr>
     </table>
+    <p>On a Mac, press <kbd>⌘</kbd> Command where the table says <kbd>Ctrl</kbd>, and the <kbd>delete</kbd> key (⌫) for <kbd>Del</kbd>.</p>
+  </section>
+
+  <section id="problems">
+    <h2>If something goes wrong</h2>
+    <p>GTReview writes a log, <code>GTReview.log</code>, into the batch directory you loaded, as soon as
+      <b>Browse &amp; load…</b> finds cases there. Every session that loads the folder adds to the end of it.</p>
+    <ul>
+      <li>It holds GTReview's messages and errors with their tracebacks, any uncaught error in GTReview's code, and
+        warnings and errors from Slicer, VTK and Qt; a run of identical ones is written once, with a count. Slicer's
+        warnings are copied when Slicer gets back to its event loop, so one can show up below GTReview lines that
+        came after it.</li>
+      <li>If Slicer crashes, the Python stack at that moment is in it. Not on Windows: crash reports are off there.</li>
+      <li>If Slicer stops responding for 15 seconds, a block starting <code>Timeout (0:00:15)!</code> shows where
+        Slicer's main thread was stuck, again every 15 seconds while it stays stuck. That is not always GTReview:
+        another module at work, a slow repaint, macOS App Nap, or the computer waking from sleep can leave one too.
+        The block has no time stamp of its own; it belongs to the time of the lines around it.</li>
+      <li>Crash and freeze reports start only once a batch with cases is loaded. What GTReview logs before that waits
+        in memory, and is lost if Slicer crashes first.</li>
+      <li>Each session starts with a header naming the GTReview build, the Slicer version and where Slicer's own
+        log file is.</li>
+      <li>The log moves only when a session starts: once it has passed 5&nbsp;MB, it becomes
+        <code>GTReview.log.1</code> and a fresh one begins. Within a session, past 5&nbsp;MB, Slicer's warnings stop
+        being copied (Slicer's own log still has them); GTReview's own lines keep coming.</li>
+      <li>It contains folder paths and case ids, and warnings from anything else open in Slicer during the session
+        can appear in it too. GTReview never sends it anywhere, but a shared or synced batch directory carries it
+        along like any other file.</li>
+    </ul>
+    <div class="note">
+      <b>On Windows</b> the log stays open while the batch is loaded, and Windows will not move, rename or delete a
+      folder holding an open file. Close Slicer, or load another batch, before you move, rename or delete the batch
+      folder.
+    </div>
+    <div class="note">
+      <b>Reporting a problem?</b> Send:
+      <ul>
+        <li><code>GTReview.log</code> from the batch directory, and <code>GTReview.log.1</code> if there is one;</li>
+        <li>Slicer's own log, the file named in the header of the session where the problem happened (Slicer starts
+          a new log every time it runs, so the newest is not always the right one);</li>
+        <li>the case id and a sentence on what you were doing.</li>
+      </ul>
+    </div>
   </section>
 
   <footer>
-    GTReview for 3D Slicer 5.10 · <a href="panel-guide.html">Panel guide</a> ·
+    GTReview for 3D Slicer 5.12 · <a href="panel-guide.html">Panel guide</a> ·
     <a href="https://github.com/melandur/SlicerGTReview">Source and packages</a>
   </footer>
 </main>

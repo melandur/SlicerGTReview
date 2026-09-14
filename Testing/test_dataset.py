@@ -28,6 +28,10 @@ from GTReviewLib.dataset import (  # noqa: E402
     parse_case_files,
 )
 
+# chmod cannot lock a directory against root, who reads it anyway, nor on
+# Windows, where it only sets the read-only attribute and os.geteuid is missing.
+CHMOD_CANNOT_LOCK = getattr(os, "geteuid", lambda: 1)() == 0 or os.name == "nt"
+
 REAL_BATCH = (
     "/home/melandur/Neosoma Inc. Dropbox/Neosoma Inc. R&D AI/01_Annotation/METS/"
     "04_Groundtruthed/01_Yale/batch_01"
@@ -76,6 +80,33 @@ class TestClassifyKey(unittest.TestCase):
         for key in ("seg", "pred_seg", "gt", "mask", "label", "labels",
                     "tumor_mask", "manual_gt", "SEG", "Pred_Seg"):
             self.assertEqual(classify_key(key), MASK, key)
+
+    def test_a_word_ending_in_the_review_key_is_a_mask(self):
+        # the review key must start a word: these are masks still to review,
+        # and taking them for reviews would leave the case nothing to load
+        for key in ("unreviewed_seg", "Unreviewed_Seg", "prereviewed_seg"):
+            self.assertEqual(classify_key(key), MASK, key)
+
+    def test_a_negated_review_key_is_a_mask(self):
+        # "not_" / "non_" in front says the opposite of a review
+        for key in ("not_reviewed_seg", "Not_Reviewed_Seg", "non_reviewed_seg",
+                    "t1c_not_reviewed_seg", "NON_REVIEWED_SEG"):
+            self.assertEqual(classify_key(key), MASK, key)
+
+    def test_the_review_key_must_end_a_word_too(self):
+        # "reviewed_segmentation" only begins with the key; rule 2 then looks
+        # at its end, which is no mask key either
+        self.assertEqual(classify_key("reviewed_segmentation"), IMAGE)
+        self.assertEqual(classify_key("t1c_reviewed_segmentation"), IMAGE)
+
+    def test_which_keys_are_reviews(self):
+        # the rule in one place: whole words, start and end, not negated
+        for key in ("reviewed_seg", "reviewed_seg_v2", "old_reviewed_seg",
+                    "t1c_reviewed_seg_2", "Reviewed_Seg_Backup"):
+            self.assertEqual(classify_key(key), REVIEWED, key)
+        for key in ("unreviewed_seg", "prereviewed_seg", "not_reviewed_seg",
+                    "non_reviewed_seg", "reviewed_segmentation"):
+            self.assertNotEqual(classify_key(key), REVIEWED, key)
 
     def test_pred_seg_is_a_mask_not_an_image(self):
         # naive `key == "seg"` would misclassify this
@@ -195,7 +226,7 @@ class TestParseCaseFiles(TempTreeTestCase):
         self.assertEqual(case.images, {})
         self.assertEqual(case.masks, {})
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read any directory")
+    @unittest.skipIf(CHMOD_CANNOT_LOCK, "chmod cannot lock a directory for root or on Windows")
     def test_unreadable_dir_does_not_raise(self):
         case_dir = make_case(self.root, "locked", ["t1c", "seg"])
         os.chmod(case_dir, 0o000)
@@ -300,13 +331,16 @@ class TestDiscoverCases(TempTreeTestCase):
         path = touch(os.path.join(self.root, "a_file.txt"))
         self.assertEqual(discover_cases(path), [])
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read any directory")
-    def test_unreadable_root_returns_empty_list(self):
+    @unittest.skipIf(CHMOD_CANNOT_LOCK, "chmod cannot lock a directory for root or on Windows")
+    def test_unreadable_root_raises_permission_error(self):
+        # a refusal is reported, not dressed up as an empty folder: the user
+        # can grant access, but "0 cases found" gives them nothing to act on
         locked = os.path.join(self.root, "locked")
         make_case(locked, "c1", ["t1c", "seg"])
         os.chmod(locked, 0o000)
         self.addCleanup(os.chmod, locked, 0o755)
-        self.assertEqual(discover_cases(locked), [])
+        with self.assertRaises(PermissionError):
+            discover_cases(locked)
 
     def test_discovery_is_one_level_deep(self):
         # pointing one level above the batch dir must yield 0 cases, not a crash

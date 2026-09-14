@@ -11,7 +11,15 @@ tree with no GUI.  This file covers the half that only exists once Slicer has a
 main window: the widget, the segment editor, the slice views and their mouse
 interactors.  On a synthetic case (numpy + SimpleITK, never patient data) it
 
-1. loads a batch directory through the Dataset section,
+1. loads a batch directory through the Dataset section, and checks GTReview.log
+   appears in it: a header naming the Slicer version and the GTReview build,
+   a line for the case loaded, a Slicer VTK warning written once (and a burst
+   of one warning collapsed into a "repeated" line), each warning written
+   exactly once with the Error Log window's Warning filter toggled between
+   them, different warnings Slicer grouped into one row each written, an
+   exception escaping a Qt callback in GTReview code with its traceback, and
+   the watchdog's stack while the main thread is blocked -- and that the log
+   never passes for a case, an image or a mask,
 2. selects a lesion in the table and checks the brush unlocks and the views
    jump onto it,
 3. paints a stroke with the Paint effect by sending real mouse events to the
@@ -29,13 +37,37 @@ interactors.  On a synthetic case (numpy + SimpleITK, never patient data) it
 6. deletes a lesion with its row's trash button, confirmation stubbed,
 7. saves, then removes the review with the Delete review button, confirmation
    stubbed, and checks the file is gone and the case reopened from its
-   original mask,
+   original mask; then makes the save offered as the scene closes fail and
+   checks the reviewer is told which case lost its edits,
 8. opens a second, multi-sequence case (t1, t1c, t2, flair) and checks the
    Sequences (axial) layout is chosen on its own, shows each sequence in its
    own axial view, links the views so a scroll in one moves the others, and
    gives way to a layout the reviewer picked; also that the lesion list bridges
    a one-voxel gap (dilation before connected components) and that label 3
-   (Edema) is present, paintable and exported as 3.
+   (Edema) is present, paintable and exported as 3,
+9. checks the shortcut labels: those built at setup are Qt's native spelling
+   of their keys, those built on demand carry a marker put in place of
+   shortcutText (on Linux a native label and a hand-written one look alike):
+   the footer, the Save & next case, Undo, Redo and Delete review tooltips,
+   a row's delete button and the delete-lesion and delete-label prompts;
+   and Esc stays the word Esc; also that the Mac delete key (Backspace) is
+   bound only when the platform flag says macOS -- and then deletes the
+   lesion but leaves a focused text box alone,
+10. makes case discovery raise PermissionError and checks the panel says
+    Slicer was denied access (with the macOS privacy hint only on a Mac)
+    instead of reporting 0 cases, keeps the open case and starts no
+    GTReview.log,
+11. checks the batch-directory history lists one directory once however it
+    was spelled, Windows spellings included,
+12. flips the application palette between light and dark and checks the
+    section tints and the drawn icons follow it,
+13. starts a scene close with unsaved edits, the prompt stubbed, and checks
+    Discard saves nothing while Save goes through _saveBeforeSceneClose
+    before the case is torn down,
+14. loads a batch, then a folder with no cases, and checks no GTReview.log is
+    written there and the dropped batch's log is closed,
+15. runs the panel's cleanup and checks it takes GTReview's handler off the
+    root logger, puts sys.excepthook back and stops the watchdog timer.
 
 The file is deliberately NOT named ``test_*``: the unit suite
 (``PythonSlicer -m unittest discover -s Testing``) must not pick it up, because
@@ -46,17 +78,22 @@ Prints one PASS/FAIL line per check plus a summary, and exits non-zero through
 ``slicer.util.exit`` when anything failed.
 """
 
+import logging
+import ntpath
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
 import traceback
 import unittest
+from unittest import mock
 
 import numpy as np
 import SimpleITK as sitk
 
+import ctk
 import qt
 import slicer
 import vtk
@@ -309,6 +346,63 @@ def scrollLikeTheMouse(sliceWidget, deltaMm):
     pump(0.1)
 
 
+def moduleGlobals(widget):
+    """The globals the widget's own methods look names up in.
+
+    ``gtreview`` above is whatever ``import GTReview`` returned here, which is
+    only the module Slicer loaded the widget from if both ended up under the
+    same sys.modules entry.  A flag patched through the methods' own globals
+    reaches the widget either way.
+    """
+    return type(widget).installShortcuts.__globals__
+
+
+def nativeText(keys):
+    return qt.QKeySequence(keys).toString(qt.QKeySequence.NativeText)
+
+
+def plainToolTip(widget):
+    """A widget's tooltip as the panel wrote it.
+
+    Slicer's tooltip trapper (ctkToolTipTrapper, with word wrap on) turns a
+    plain tooltip into rich text the moment it is set: "<p>...</p>", a newline
+    as <br>, and "<", ">" and "&" escaped.  Read back through a text document,
+    the tooltip is again exactly the text the panel passed.
+    """
+    document = qt.QTextDocument()
+    document.setHtml(str(widget.toolTip))
+    return str(document.toPlainText())
+
+
+def readText(path):
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+#: every entry of GTReview.log starts with a logging time stamp
+LOG_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} ")
+
+
+def logEntries(text):
+    """GTReview.log as entries: a time-stamped line with the lines under it."""
+    entries = []
+    for line in text.splitlines():
+        if LOG_STAMP.match(line) or not entries:
+            entries.append(line)
+        else:
+            entries[-1] += "\n" + line
+    return entries
+
+
+def lastSessionHeader(text):
+    """The header of the newest session in GTReview.log, up to its closing rule."""
+    start = text.rfind("GTReview session started")
+    if start < 0:
+        return ""
+    end = text.find("=" * 72, start)
+    return text[start:] if end < 0 else text[start:end]
+
+
 def rowOfLesion(widget, lesionIndex):
     for row in range(widget.lesionTable.rowCount):
         item = widget.lesionTable.item(row, widget.LESION_COLUMN_NUMBER)
@@ -404,6 +498,227 @@ class GTReviewIntegrationTest(unittest.TestCase):
         pump()
         red = sliceWidgetNamed("Red")
         CHECKS.check(red.mrmlSliceNode() is not None, "the Red slice view is up")
+
+    def test_01b_session_log_in_the_batch_folder(self):
+        CHECKS.step("GTReview.log: written into the batch folder that was loaded")
+        widget = self.widget
+        namespace = moduleGlobals(widget)
+        logModule = namespace["sessionlog"]
+        logPath = os.path.join(self.tempRoot, logModule.LOG_FILE_NAME)
+        sessionLog = widget.sessionLog
+        CHECKS.check(os.path.isfile(logPath), "loading the batch created GTReview.log in it",
+                     logPath)
+        CHECKS.check(sessionLog is not None and sessionLog.path is not None
+                     and os.path.samefile(sessionLog.path, logPath),
+                     "and the session log is writing there",
+                     str(sessionLog.path if sessionLog is not None else None))
+
+        # ---- the header and the event lines ---------------------------------
+        text = readText(logPath)
+        header = lastSessionHeader(text)
+        CHECKS.check(slicer.app.applicationVersion in header,
+                     "the header names the Slicer version", header.replace("\n", " | "))
+        build = logModule.installed_build(namespace["__file__"]) or "source tree {}".format(
+            os.path.dirname(os.path.abspath(namespace["__file__"])))
+        CHECKS.check("GTReview build" in header and build in header,
+                     "the header names the GTReview build", "expected {}".format(build))
+        crashReports = ("Crash reports: on" if getattr(logModule, "CRASH_REPORTS_ENABLED", True)
+                        else "Crash reports: off (Windows)")
+        CHECKS.check(crashReports in header, "and says whether crash stacks go into the file",
+                     "expected {}".format(crashReports))
+        session = text[text.rfind("GTReview session started"):]
+        CHECKS.check("GTReview: dataset loaded from" in session,
+                     "a line records the dataset that was loaded")
+        caseLines = [entry for entry in logEntries(session)
+                     if "GTReview: case {} loaded".format(CASE_ID) in entry]
+        CHECKS.check(bool(caseLines) and CASE_ID + "_seg.nii.gz" in caseLines[-1]
+                     and "2 lesions" in caseLines[-1],
+                     "a line records the case loaded, its mask file and its lesion count",
+                     " | ".join(caseLines))
+
+        # ---- the log is never data ------------------------------------------
+        datasetModule = namespace["dataset"]
+
+        def filesOf(cases):
+            return [path for case in cases
+                    for path in [case.directory] + list(case.images.values())
+                    + list(case.masks.values())]
+
+        found = datasetModule.discover_cases(self.tempRoot)
+        CHECKS.check(len(found) == 1 and found[0].case_id == CASE_ID,
+                     "with GTReview.log beside the case folder, discovery finds the one case",
+                     str([case.case_id for case in found]))
+        CHECKS.check(not any(os.path.basename(path).startswith(logModule.LOG_FILE_NAME)
+                             for path in filesOf(found)),
+                     "and the log is not a case, an image or a mask", str(filesOf(found)))
+        # a batch that is a single case folder has the log among the case's files
+        caseDir = os.path.join(self.tempRoot, CASE_ID)
+        stray = os.path.join(caseDir, logModule.LOG_FILE_NAME)
+        with open(stray, "w", encoding="utf-8") as handle:
+            handle.write("a log among the case's files\n")
+        try:
+            single = datasetModule.discover_cases(caseDir)
+        finally:
+            os.remove(stray)
+        CHECKS.check(len(single) == 1 and not any(
+            os.path.basename(path).startswith(logModule.LOG_FILE_NAME)
+            for path in filesOf(single)[1:]),
+            "in a case folder loaded as the batch, the log is not an image or a mask",
+            str(filesOf(single)))
+        CHECKS.check(not datasetModule.is_nifti(logModule.LOG_FILE_NAME)
+                     and not datasetModule.is_nifti(logModule.LOG_FILE_NAME + ".1"),
+                     "neither the log nor its rotated copy passes for a NIfTI file")
+
+        # ---- Slicer's own warnings ------------------------------------------
+        CHECKS.check(widget._errorLogModel is not None,
+                     "precondition: the panel follows Slicer's error log")
+
+        def historyWarnings():
+            return [entry for entry in logEntries(readText(logPath))
+                    if "[VTK]" in entry.split("\n", 1)[0] and "vtkSegmentationHistory" in entry]
+
+        # Two history objects alive at once: VTK prints the object's address,
+        # so their warnings differ, while one object repeats itself exactly.
+        first = slicer.vtkSegmentationHistory()
+        burst = slicer.vtkSegmentationHistory()
+        before = len(historyWarnings())
+        first.RestorePreviousState()  # no segmentation, nothing to restore: VTK warns
+        pump(0.3)
+        warnings = historyWarnings()
+        CHECKS.check(len(warnings) == before + 1,
+                     "a VTK warning raised in Slicer is written once, as a [VTK] entry",
+                     "{} new entries".format(len(warnings) - before))
+        for _ in range(5):
+            burst.RestorePreviousState()
+        pump(0.3)
+        afterBurst = historyWarnings()
+        CHECKS.check(len(afterBurst) == len(warnings) + 1,
+                     "five identical warnings in a row are written once",
+                     "{} new entries".format(len(afterBurst) - len(warnings)))
+        first.RestorePreviousState()  # a different warning ends the run
+        pump(0.3)
+        entries = logEntries(readText(logPath))
+        burstAt = entries.index(afterBurst[-1]) if afterBurst and afterBurst[-1] in entries else -1
+        following = entries[burstAt + 1].split("\n", 1)[0] if 0 <= burstAt < len(entries) - 1 else ""
+        CHECKS.check(following.endswith("[VTK] ... repeated 4 more times"),
+                     "and the next, different, one writes how many more times it came, "
+                     "right under it", following)
+
+        # ---- the Error Log window's level filter ----------------------------
+        # errorLogModel() is a filter proxy following the Error Log window's
+        # level checkboxes: unticking Warning takes every warning row out of it,
+        # ticking it again puts them back.  Neither may cost a warning or write
+        # one twice.  vtkOutputWindow raises a VTK warning with a text of ours.
+        outputWindow = vtk.vtkOutputWindow.GetInstance()
+
+        def vtkWarnings(marker):
+            return [entry for entry in logEntries(readText(logPath))
+                    if entry.split("\n", 1)[0].endswith("[VTK] " + marker)]
+
+        errorLog = slicer.app.errorLogModel()
+        levelFilter = ctk.ctkErrorLogWidget()  # the Error Log window's checkboxes
+        levelFilter.setErrorLogModel(errorLog)
+        filtered = ["GTReview integration: a warning {}".format(when) for when in (
+            "before Warning is unticked", "while Warning is unticked",
+            "after Warning is ticked again")]
+        try:
+            outputWindow.DisplayWarningText(filtered[0])
+            pump(0.3)
+            levelFilter.setWarningEntriesVisible(False)
+            pump(0.1)
+            shownRows, allRows = int(errorLog.rowCount()), int(errorLog.sourceModel.rowCount())
+            outputWindow.DisplayWarningText(filtered[1])
+            pump(0.3)
+            levelFilter.setWarningEntriesVisible(True)
+            pump(0.1)
+            outputWindow.DisplayWarningText(filtered[2])
+            pump(0.3)
+        finally:
+            levelFilter.setWarningEntriesVisible(True)
+            levelFilter.deleteLater()
+        CHECKS.check(shownRows < allRows,
+                     "precondition: unticking Warning in the Error Log window hides rows of "
+                     "errorLogModel()", "{} of {} rows shown".format(shownRows, allRows))
+        for marker in filtered:
+            found = vtkWarnings(marker)
+            CHECKS.check(len(found) == 1, "written exactly once: " + marker.split(": ", 1)[1],
+                         "{} entries".format(len(found)))
+
+        # ---- entries Slicer groups into one row -----------------------------
+        # An entry from the same thread, level and origin as the row before it,
+        # within about a second, adds no row -- whatever its text -- and is
+        # still signalled.  Sent back to back, with no check printing between
+        # them, these land in one row or two.
+        grouped = ["GTReview integration: grouped warning {}".format(name) for name in "ABC"]
+        same = "GTReview integration: one warning again and again"
+        closing = "GTReview integration: a different warning ends the run"
+        sameTimes = 8
+        for marker in grouped:
+            outputWindow.DisplayWarningText(marker)
+        for _ in range(sameTimes):
+            outputWindow.DisplayWarningText(same)
+        outputWindow.DisplayWarningText(closing)
+        pump(0.3)
+        firstLines = [entry.split("\n", 1)[0] for entry in logEntries(readText(logPath))]
+
+        def positions(marker):
+            return [i for i, line in enumerate(firstLines) if line.endswith("[VTK] " + marker)]
+
+        found = [positions(marker) for marker in grouped]
+        CHECKS.check(all(len(where) == 1 for where in found) and found == sorted(found),
+                     "different warnings Slicer grouped into one row are each written once, "
+                     "in order", str(found))
+        sameAt, closingAt = positions(same), positions(closing)
+        CHECKS.check(len(sameAt) == 1,
+                     "{} identical warnings in a row are written once".format(sameTimes),
+                     "{} entries".format(len(sameAt)))
+        between = (firstLines[sameAt[0] + 1:closingAt[0]]
+                   if len(sameAt) == 1 and len(closingAt) == 1 else [])
+        CHECKS.check(bool(between)
+                     and between[0].endswith("[VTK] ... repeated {} more times".format(sameTimes - 1))
+                     and sum(1 for line in between if "... repeated" in line) == 1,
+                     "followed by exactly one line saying how many more times it came",
+                     " | ".join(between))
+
+        # ---- an exception escaping a Qt callback in GTReview's code ---------
+        def uncaughtReports():
+            return [entry for entry in logEntries(readText(logPath))
+                    if "Uncaught exception" in entry.split("\n", 1)[0]]
+
+        before = len(uncaughtReports())
+        # _elide compares the length of its text with the limit: a limit that is
+        # not a number raises inside GTReview.py, called from a Qt timer.
+        qt.QTimer.singleShot(0, lambda: widget._elide("a path to elide", limit="not a number"))
+        pump(0.3)
+        uncaught = uncaughtReports()
+        CHECKS.check(len(uncaught) == before + 1,
+                     "an uncaught exception in a Qt callback is written to GTReview.log",
+                     "{} new entries".format(len(uncaught) - before))
+        report = uncaught[-1] if uncaught else ""
+        CHECKS.check("Traceback (most recent call last)" in report and "in _elide" in report
+                     and "TypeError" in report,
+                     "with its traceback through GTReview's code",
+                     report.replace("\n", " | ")[-400:])
+
+        # ---- a blocked main thread ------------------------------------------
+        timer = widget._watchdogTimer
+        CHECKS.check(timer is not None and timer.isActive()
+                     and int(timer.interval) == logModule.WATCHDOG_REARM_MS,
+                     "the panel keeps re-arming the hang watchdog from a timer")
+        reportsBefore = readText(logPath).count("Timeout (")
+        try:
+            sessionLog.arm_watchdog(0.5)
+            time.sleep(1.2)  # no events run, so nothing re-arms it
+        finally:
+            sessionLog.arm_watchdog()  # back to the panel's own timeout
+        text = readText(logPath)
+        CHECKS.check(text.count("Timeout (") > reportsBefore,
+                     "blocking the main thread past the timeout writes a Timeout report")
+        stack = text[text.rfind("Timeout ("):]
+        CHECKS.check("most recent call first" in stack
+                     and "test_01b_session_log_in_the_batch_folder" in stack,
+                     "with the stack of the thread that was stuck",
+                     stack[:400].replace("\n", " | "))
 
     def test_02_select_a_lesion(self):
         CHECKS.step("Selecting the largest lesion in the table")
@@ -938,6 +1253,9 @@ class GTReviewIntegrationTest(unittest.TestCase):
         CHECKS.check(str(target.voxel_count) in confirm.prompts[0],
                      "the prompt spells out what is about to go",
                      confirm.prompts[0].replace("\n", " ") if confirm.prompts else "")
+        CHECKS.check("({})".format(nativeText("Ctrl+Z")) in confirm.prompts[0],
+                     "and names the Undo key the way this platform spells it",
+                     confirm.prompts[0].replace("\n", " "))
 
         exported = widget.logic.exportLabelmapArrayIJK()
         CHECKS.check(int((exported == 2).sum()) == 0,
@@ -973,9 +1291,25 @@ class GTReviewIntegrationTest(unittest.TestCase):
         CHECKS.check(int((saved == 2).sum()) == 0,
                      "the saved file carries the deletion")
 
-        with ConfirmStub(True) as confirm:
-            widget.deleteReviewButton.click()
-            pump()
+        widgetMaskio = moduleGlobals(widget)["maskio"]
+        originalRemove = widgetMaskio.remove_file
+        removed = []
+
+        def recordingRemove(path):
+            removed.append(path)
+            return originalRemove(path)
+
+        widgetMaskio.remove_file = recordingRemove
+        try:
+            with ConfirmStub(True) as confirm:
+                widget.deleteReviewButton.click()
+                pump()
+        finally:
+            widgetMaskio.remove_file = originalRemove
+        CHECKS.check(removed == [case.reviewed_path],
+                     "the file is removed through maskio.remove_file, which waits out "
+                     "a file another program still holds on Windows",
+                     str(removed))
         CHECKS.check(bool(confirm.prompts), "Delete review asked first")
         CHECKS.check(case.reviewed_path in confirm.prompts[0],
                      "the prompt names the file it is about to erase",
@@ -994,6 +1328,48 @@ class GTReviewIntegrationTest(unittest.TestCase):
                      "both lesions are listed again",
                      "{} lesions".format(len(widget.lesionList)))
 
+
+    def test_08b_failed_save_before_scene_close(self):
+        CHECKS.step("A save asked for as the scene closes, failing, is shown to the reviewer")
+        widget = self.widget
+        case = widget.currentCase()
+        CHECKS.check(case is not None and widget.logic.case is not None,
+                     "precondition: a case is open")
+        logPath = os.path.join(self.tempRoot, moduleGlobals(widget)["sessionlog"].LOG_FILE_NAME)
+        saves = []
+        shown = []
+
+        def failingSave():
+            saves.append(True)
+            raise OSError(28, "No space left on device", case.reviewed_path)
+
+        def recordError(text, *args, **kwargs):
+            del args, kwargs
+            shown.append(str(text))
+
+        originalErrorDisplay = slicer.util.errorDisplay
+        widget.saveCurrentCase = failingSave
+        slicer.util.errorDisplay = recordError
+        try:
+            result = widget._saveBeforeSceneClose()
+        finally:
+            del widget.saveCurrentCase
+            slicer.util.errorDisplay = originalErrorDisplay
+        CHECKS.check(saves == [True], "the save was attempted")
+        CHECKS.check(result is None,
+                     "the failure goes no further, so the scene close carries on")
+        CHECKS.check(len(shown) == 1, "the reviewer is told, once", " | ".join(shown))
+        message = shown[0] if shown else ""
+        CHECKS.check("Saving case {} failed".format(case.case_id) in message,
+                     "the message names the case", message.replace("\n", " "))
+        CHECKS.check("unsaved edits are lost" in message,
+                     "and says its unsaved edits are lost", message.replace("\n", " "))
+        CHECKS.check("No space left on device" in message, "and why the save failed")
+        logged = [entry for entry in logEntries(readText(logPath))
+                  if "GTReview: saving before scene close failed" in entry]
+        CHECKS.check(bool(logged) and "Traceback" in logged[-1] and "OSError" in logged[-1],
+                     "GTReview.log keeps the failure with its traceback",
+                     logged[-1].replace("\n", " | ")[:300] if logged else "no entry")
 
     def test_09_multi_sequence_case(self):
         CHECKS.step("Opening a case with four sequences")
@@ -1126,6 +1502,427 @@ class GTReviewIntegrationTest(unittest.TestCase):
         widget.unsavedChanges = False
         if self.multiRoot and os.path.isdir(self.multiRoot):
             shutil.rmtree(self.multiRoot, ignore_errors=True)
+
+    def test_10_shortcut_labels_and_the_mac_delete_key(self):
+        CHECKS.step("Shortcut labels in the platform's spelling, and the Mac delete key")
+        widget = self.widget
+        namespace = moduleGlobals(widget)
+
+        # ---- labels built at setup: Qt's NativeText of the keys --------------
+        CHECKS.check(namespace["shortcutText"]("Ctrl+Z") == nativeText("Ctrl+Z"),
+                     "shortcutText is QKeySequence's NativeText")
+        CHECKS.check(plainToolTip(widget.undoButton) == widget._undoToolTip()
+                     == "Undo the last edit ({})".format(nativeText("Ctrl+Z")),
+                     "the Undo tooltip names the native Undo key", widget.undoButton.toolTip)
+        CHECKS.check(plainToolTip(widget.redoButton) == widget._redoToolTip()
+                     == "Redo ({} or {})".format(nativeText("Ctrl+Y"), nativeText("Ctrl+Shift+Z")),
+                     "the Redo tooltip names both native Redo keys", widget.redoButton.toolTip)
+        CHECKS.check(nativeText("Ctrl+Z") in widget.deleteReviewButton.toolTip,
+                     "the Delete review tooltip names the native Undo key")
+        CHECKS.check("Esc cancels" in widget.newLesionButton.toolTip,
+                     "the New lesion tooltip says Esc as the word, never the Mac symbol",
+                     widget.newLesionButton.toolTip)
+        footer = " ".join(str(label.text)
+                          for label in widget.shortcutsFrame.findChildren(qt.QLabel))
+        CHECKS.check(all(text in footer for text in (
+            nativeText("Ctrl+Z"), nativeText("Ctrl+S"), "Esc",
+            namespace["modifierGestureText"]("Ctrl", "wheel"))),
+            "the footer on screen shows the native spellings, and Esc", footer)
+
+        # ---- labels built on demand ask shortcutText -------------------------
+        # On Linux NativeText spells a key exactly as a hand-written label
+        # would, so comparing with it cannot catch a label that never asked Qt.
+        # A marker standing in for shortcutText can: whatever is built while it
+        # stands in must carry it.
+        originalShortcutText = namespace["shortcutText"]
+        widget.lesionTable.selectRow(0)
+        pump(0.1)
+        CHECKS.check(widget.selectedLesion() is not None, "precondition: a lesion is selected")
+        try:
+            namespace["shortcutText"] = lambda keys: "<" + keys + ">"
+            CHECKS.check("<Ctrl+S> saves without moving on" in widget._saveAndNextToolTip(),
+                         "the Save & next case tooltip asks shortcutText for the Save key",
+                         widget._saveAndNextToolTip())
+            CHECKS.check(widget._undoToolTip() == "Undo the last edit (<Ctrl+Z>)",
+                         "the Undo tooltip asks shortcutText for the Undo key",
+                         widget._undoToolTip())
+            CHECKS.check(widget._redoToolTip() == "Redo (<Ctrl+Y> or <Ctrl+Shift+Z>)",
+                         "the Redo tooltip asks shortcutText for both Redo keys",
+                         widget._redoToolTip())
+            CHECKS.check("-- <Ctrl+Z> does not reach it." in widget._deleteReviewToolTip(),
+                         "the Delete review tooltip asks shortcutText for the Undo key",
+                         widget._deleteReviewToolTip())
+            keyRows = dict((what, keys) for keys, what in widget._shortcutKeyRows())
+            CHECKS.check(keyRows["undo / redo"] == "<Ctrl+Z> / <Ctrl+Y>",
+                         "footer: undo / redo", keyRows["undo / redo"])
+            CHECKS.check(keyRows["save"] == "<Ctrl+S>", "footer: save", keyRows["save"])
+            CHECKS.check(keyRows["delete the selected lesion"]
+                         == ("<Backspace>" if namespace["IS_MAC"] else "<Del>"),
+                         "footer: the delete key as this keyboard labels it",
+                         keyRows["delete the selected lesion"])
+            CHECKS.check(keyRows["stop editing"] == "Esc",
+                         "footer: stop editing is the word Esc, not a spelling Qt picks",
+                         keyRows["stop editing"])
+            viewRows = dict((what, keys) for keys, what in widget._shortcutViewRows())
+            for modifier, gesture, what in (("Ctrl", "wheel", "zoom too"),
+                                            ("Shift", "drag", "move the image too")):
+                CHECKS.check(viewRows[what].startswith("<{}+".format(modifier))
+                             and viewRows[what].endswith(gesture),
+                             "footer: {} is the {} modifier, as shortcutText spells it, "
+                             "plus {}".format(what, modifier, gesture), viewRows[what])
+            with ConfirmStub(False) as confirm:
+                widget.onDeleteLesion()
+                pump(0.1)
+            CHECKS.check(len(confirm.prompts) == 1 and "(<Ctrl+Z>)" in confirm.prompts[0],
+                         "the delete-lesion prompt asks shortcutText for the Undo key",
+                         confirm.prompts[0].replace("\n", " ") if confirm.prompts else "no prompt")
+            with ConfirmStub(False) as confirm:
+                widget.onDeleteLabel()
+                pump(0.1)
+            CHECKS.check(len(confirm.prompts) == 1
+                         and "This can be undone (<Ctrl+Z>)." in confirm.prompts[0],
+                         "the delete-label prompt asks shortcutText for the Undo key",
+                         confirm.prompts[0].replace("\n", " ") if confirm.prompts else "no prompt")
+            widget._installLesionDeleteButtons()
+            rowButton = widget.lesionTable.cellWidget(0, widget.LESION_DELETE_COLUMN)
+            CHECKS.check(rowButton is not None and "<Ctrl+Z>" in plainToolTip(rowButton),
+                         "a row's delete button asks shortcutText for the Undo key",
+                         rowButton.toolTip if rowButton is not None else "no button")
+        finally:
+            namespace["shortcutText"] = originalShortcutText
+            # the row buttons built under the marker must not stay on screen
+            widget._installLesionDeleteButtons()
+        rowButton = widget.lesionTable.cellWidget(0, widget.LESION_DELETE_COLUMN)
+        CHECKS.check(rowButton is not None and nativeText("Ctrl+Z") in rowButton.toolTip,
+                     "with shortcutText back, the row buttons name the native Undo key again")
+
+        # ---- the Mac delete key is Backspace, and only a Mac binds it -------
+        originalMac = namespace["IS_MAC"]
+        originalFocus = namespace["focusedTextInput"]
+        deletes = []
+
+        def backspaceRows():
+            return [position for position, shortcut in enumerate(widget._shortcuts)
+                    if shortcut.key.toString() == "Backspace"]
+
+        try:
+            namespace["IS_MAC"] = False
+            widget.installShortcuts()
+            CHECKS.check(not backspaceRows(), "off a Mac, Backspace is not bound")
+            CHECKS.check(any(s.key.toString() == "Del" for s in widget._shortcuts),
+                         "Delete is bound")
+            countOffMac = len(widget._shortcuts)
+
+            namespace["IS_MAC"] = True
+            CHECKS.check(dict((what, keys) for keys, what in widget._shortcutKeyRows())
+                         ["delete the selected lesion"] == nativeText("Backspace"),
+                         "on a Mac the footer names the delete key, which sends Backspace")
+            widget.onDeleteLesion = lambda: deletes.append(True)
+            widget.installShortcuts()
+            rows = backspaceRows()
+            CHECKS.check(len(rows) == 1 and len(widget._shortcuts) == countOffMac + 1,
+                         "on a Mac, reinstalling the shortcuts adds one Backspace binding",
+                         "{} Backspace, {} shortcuts".format(len(rows), len(widget._shortcuts)))
+            CHECKS.check(any(s.key.toString() == "Del" for s in widget._shortcuts),
+                         "and Delete stays bound next to it")
+            CHECKS.check(widget._shortcuts[rows[0]].context == qt.Qt.ApplicationShortcut,
+                         "Backspace works wherever the focus is in the main window")
+            handler = widget._shortcutHandlers[rows[0]]
+            namespace["focusedTextInput"] = lambda: None
+            handler()
+            CHECKS.check(len(deletes) == 1, "Backspace deletes the selected lesion")
+            namespace["focusedTextInput"] = lambda: widget.datasetPathEdit
+            handler()
+            CHECKS.check(len(deletes) == 1,
+                         "but a focused text box keeps Backspace for itself")
+        finally:
+            namespace["IS_MAC"] = originalMac
+            namespace["focusedTextInput"] = originalFocus
+            if "onDeleteLesion" in vars(widget):
+                del widget.onDeleteLesion
+            widget.installShortcuts()
+        CHECKS.check(len(backspaceRows()) == (1 if originalMac else 0),
+                     "the platform's own shortcuts are back")
+
+    def test_11_denied_batch_directory(self):
+        CHECKS.step("A batch directory Slicer may not read is reported as such")
+        widget = self.widget
+        namespace = moduleGlobals(widget)
+        datasetModule = namespace["dataset"]
+        originalDiscover = datasetModule.discover_cases
+        originalMac = namespace["IS_MAC"]
+        originalPath = str(widget.datasetPathEdit.currentPath)
+        casesBefore = list(widget.cases)
+        caseBefore = widget.currentCase()
+        historyBefore = widget._datasetHistory()
+        deniedRoot = os.path.join(tempfile.gettempdir(), "gtreview_integration_denied")
+        logName = namespace["sessionlog"].LOG_FILE_NAME
+        logBefore = widget.sessionLog.path
+        asked = []
+        shown = []
+
+        def deny(root):
+            asked.append(root)
+            raise PermissionError(13, "Permission denied", root)
+
+        def recordError(text, *args, **kwargs):
+            del args, kwargs
+            shown.append(str(text))
+
+        originalErrorDisplay = slicer.util.errorDisplay
+        widget.unsavedChanges = False
+        try:
+            datasetModule.discover_cases = deny
+            slicer.util.errorDisplay = recordError
+            widget.datasetPathEdit.currentPath = deniedRoot
+            typed = str(widget.datasetPathEdit.currentPath)
+
+            namespace["IS_MAC"] = False
+            widget.onLoadDataset()
+            pump(0.1)
+            CHECKS.check(asked == [typed], "discovery was asked for the typed directory",
+                         str(asked))
+            CHECKS.check(len(shown) == 1, "the denial is reported once, without a crash",
+                         " | ".join(shown))
+            message = shown[0] if shown else ""
+            CHECKS.check(message.startswith("Slicer was denied access to {}".format(typed)),
+                         "it says Slicer was denied access to the directory",
+                         message.replace("\n", " "))
+            CHECKS.check("0 cases" not in message
+                         and "0 cases" not in str(widget.caseStatusLabel.text),
+                         "rather than reporting 0 cases found")
+            CHECKS.check("Privacy & Security" not in message,
+                         "off a Mac there is no macOS privacy hint")
+            CHECKS.check(len(widget.cases) == len(casesBefore)
+                         and all(a is b for a, b in zip(widget.cases, casesBefore))
+                         and widget.currentCase() is caseBefore,
+                         "the dataset and the case already open stay as they were")
+            CHECKS.check(widget._datasetHistory() == historyBefore,
+                         "and the unreadable directory is not remembered")
+            CHECKS.check(widget.sessionLog.path == logBefore
+                         and not os.path.exists(os.path.join(deniedRoot, logName)),
+                         "nor given a GTReview.log", str(widget.sessionLog.path))
+
+            del shown[:]
+            namespace["IS_MAC"] = True
+            widget.onLoadDataset()
+            pump(0.1)
+            message = shown[0] if shown else ""
+            CHECKS.check(len(shown) == 1 and message.startswith("Slicer was denied access to"),
+                         "on a Mac the denial is reported the same way",
+                         message.replace("\n", " "))
+            CHECKS.check("System Settings > Privacy & Security > Files and Folders" in message,
+                         "with the macOS privacy setting to allow it in",
+                         message.replace("\n", " "))
+        finally:
+            datasetModule.discover_cases = originalDiscover
+            slicer.util.errorDisplay = originalErrorDisplay
+            namespace["IS_MAC"] = originalMac
+            widget.datasetPathEdit.currentPath = originalPath
+
+    def test_12_history_lists_a_directory_once(self):
+        CHECKS.step("The batch-directory history lists one directory once")
+        widget = self.widget
+        settings = slicer.app.userSettings()
+        historyRoot = tempfile.mkdtemp(prefix="gtreview_integration_history_")
+        originalPath = str(widget.datasetPathEdit.currentPath)
+        try:
+            batch = os.path.join(historyRoot, "batch_01")
+            other = os.path.join(historyRoot, "batch_02")
+            settings.setValue(gtreview.DATASET_HISTORY_KEY, [
+                batch + os.sep, other, os.path.join(historyRoot, ".", "batch_01"),
+            ])
+            widget.datasetPathEdit.currentPath = batch
+            current = str(widget.datasetPathEdit.currentPath)
+            widget._rememberDatasetPath()
+            history = widget._datasetHistory()
+            CHECKS.check(history == [current, other],
+                         "a trailing separator or a ./ does not make a second entry",
+                         str(history))
+
+            # Windows spellings of one folder, judged the way Windows judges
+            # them: ntpath stands in for os.path only while the history is built
+            settings.setValue(gtreview.DATASET_HISTORY_KEY, [
+                "C:/Data/Batch_01", "D:\\other", "c:\\data\\batch_01\\",
+            ])
+            widget.datasetPathEdit.currentPath = "C:\\Data\\Batch_01"
+            current = str(widget.datasetPathEdit.currentPath)
+            with mock.patch.object(os.path, "normcase", ntpath.normcase), \
+                    mock.patch.object(os.path, "normpath", ntpath.normpath):
+                widget._rememberDatasetPath()
+            history = widget._datasetHistory()
+            CHECKS.check(history == [current, "D:\\other"],
+                         "C:/Data/Batch_01 and c:\\data\\batch_01\\ are the directory just "
+                         "loaded, so neither is listed again",
+                         str(history))
+        finally:
+            widget.datasetPathEdit.currentPath = originalPath
+            shutil.rmtree(historyRoot, ignore_errors=True)
+        # tearDownClass puts the reviewer's own history back
+
+    def test_13_theme_switch_retints_the_panel(self):
+        CHECKS.step("Switching between light and dark re-tints the sections and icons")
+        widget = self.widget
+        app = slicer.app
+        original = qt.QPalette(app.palette())
+        section = next(s for s in widget._sections
+                       if s.objectName == "GTReviewSectionDataset")
+        accent = widget.ACCENT_DATASET
+        startedDark = widget._isDarkTheme()
+        undoIcon = widget.undoButton.icon.cacheKey()
+        flipped = qt.QPalette(original)
+        window, text = ("#efefef", "#101010") if startedDark else ("#262626", "#f0f0f0")
+        flipped.setColor(qt.QPalette.Window, qt.QColor(window))
+        flipped.setColor(qt.QPalette.ButtonText, qt.QColor(text))
+        try:
+            app.setPalette(flipped)
+            pump(0.3)
+            CHECKS.check(widget._isDarkTheme() != startedDark,
+                         "precondition: the application palette went from {} to {}".format(
+                             "dark" if startedDark else "light",
+                             "light" if startedDark else "dark"))
+            expectedFill = widget._sectionColors(accent)[0]
+            fill = section.palette.color(qt.QPalette.Window).name()
+            CHECKS.check(fill == expectedFill,
+                         "the palette change re-ran the section tinting for the new theme",
+                         "{} vs {}".format(fill, expectedFill))
+            CHECKS.check(section.autoFillBackground, "and the fill is still painted")
+            CHECKS.check(widget.undoButton.icon.cacheKey() != undoIcon,
+                         "the drawn Undo icon was redrawn")
+        finally:
+            app.setPalette(original)
+            pump(0.3)
+        expectedFill = widget._sectionColors(accent)[0]
+        CHECKS.check(section.palette.color(qt.QPalette.Window).name() == expectedFill,
+                     "switching back tints the sections back")
+
+    def test_13b_scene_close_saves_through_the_shared_save(self):
+        CHECKS.step("A scene closing with unsaved edits offers the save and saves through "
+                    "_saveBeforeSceneClose")
+        widget = self.widget
+        case = widget.logic.case
+        CHECKS.check(case is not None, "precondition: a case is open")
+        asked = []
+        saves = []
+
+        def answering(choice):
+            def ask(caseId):
+                asked.append(caseId)
+                return choice
+            return ask
+
+        def recordSave():
+            # what the save found: the edits still unsaved, the case still open
+            saves.append((widget.unsavedChanges, widget.logic.case is not None))
+
+        widget._saveBeforeSceneClose = recordSave
+        try:
+            widget.unsavedChanges = True
+            widget._askSaveBeforeSceneClose = answering(False)
+            widget._offerSaveBeforeSceneClose()
+            CHECKS.check(asked == [case.case_id] and not saves,
+                         "answered Discard, the prompt names the case and nothing is saved",
+                         "asked {}, saves {}".format(asked, saves))
+            del asked[:]
+            widget._askSaveBeforeSceneClose = answering(True)
+            widget.onSceneStartClose()
+            CHECKS.check(asked == [case.case_id],
+                         "a scene starting to close with unsaved edits asks, naming the case",
+                         str(asked))
+            CHECKS.check(saves == [(True, True)],
+                         "answered Save, onSceneStartClose saves through _saveBeforeSceneClose "
+                         "while the edits and the case are still there", str(saves))
+            CHECKS.check(not widget.unsavedChanges and widget.logic.case is None,
+                         "and tears the case down after that")
+        finally:
+            for name in ("_saveBeforeSceneClose", "_askSaveBeforeSceneClose"):
+                if name in vars(widget):
+                    delattr(widget, name)
+            widget.unsavedChanges = False
+            # what the end of a real scene close does; the next step loads a batch
+            widget.onSceneEndClose()
+            pump(0.1)
+
+    def test_14_folder_without_cases_closes_the_session_log(self):
+        CHECKS.step("A folder with no cases gets no GTReview.log, and the dropped batch's "
+                    "log is closed")
+        widget = self.widget
+        logName = moduleGlobals(widget)["sessionlog"].LOG_FILE_NAME
+        emptyRoot = tempfile.mkdtemp(prefix="gtreview_integration_empty_")
+        originalPath = str(widget.datasetPathEdit.currentPath)
+        batchLog = os.path.join(self.tempRoot, logName)
+        try:
+            # a batch first, so there is a log to close: the batch of the steps
+            # before this one has been deleted along with its log
+            widget.unsavedChanges = False
+            widget.datasetPathEdit.currentPath = self.tempRoot
+            widget.onLoadDataset()
+            pump(0.1)
+            CHECKS.check(len(widget.cases) == 1 and widget.sessionLog.path is not None
+                         and os.path.samefile(widget.sessionLog.path, batchLog),
+                         "precondition: a batch is loaded and logging into its folder",
+                         str(widget.sessionLog.path))
+
+            # one level above a batch: a folder of batch folders and a stray file
+            os.makedirs(os.path.join(emptyRoot, "batch_01", "IT_009"))
+            with open(os.path.join(emptyRoot, "notes.txt"), "w", encoding="utf-8") as handle:
+                handle.write("not a case\n")
+            widget.unsavedChanges = False
+            widget.datasetPathEdit.currentPath = emptyRoot
+            typed = str(widget.datasetPathEdit.currentPath)
+            widget.onLoadDataset()
+            pump(0.1)
+            CHECKS.check(not widget.cases and widget.logic.case is None,
+                         "precondition: the folder holds no cases, so the batch is dropped",
+                         "{} cases".format(len(widget.cases)))
+            CHECKS.check(not os.path.exists(os.path.join(emptyRoot, logName)),
+                         "loading it wrote no GTReview.log there", str(os.listdir(emptyRoot)))
+            CHECKS.check(widget.sessionLog.path is None,
+                         "the dropped batch's GTReview.log is closed, so on Windows its folder "
+                         "can be moved, renamed or deleted", str(widget.sessionLog.path))
+            closing = [entry for entry in logEntries(readText(batchLog))
+                       if "no batch is loaded" in entry]
+            CHECKS.check(bool(closing) and "0 cases found in {}".format(typed) in closing[-1],
+                         "its last GTReview line says why it was closed",
+                         closing[-1] if closing else "no such line")
+            size = os.path.getsize(batchLog)
+            marker = "GTReview: integration line logged after the batch was dropped"
+            logging.info(marker)
+            pump(0.1)
+            CHECKS.check(os.path.getsize(batchLog) == size and marker not in readText(batchLog),
+                         "a GTReview line logged afterwards is not appended to it")
+        finally:
+            widget.datasetPathEdit.currentPath = originalPath
+            shutil.rmtree(emptyRoot, ignore_errors=True)
+
+    def test_15_cleanup_takes_the_session_log_down(self):
+        CHECKS.step("The panel's cleanup takes GTReview.log's handler and exception hook down")
+        widget = self.widget
+        sessionLog = widget.sessionLog
+        mark = getattr(moduleGlobals(widget)["sessionlog"], "_HANDLER_MARK",
+                       "is_gtreview_session_log")
+
+        def gtreviewHandlers():
+            return [handler for handler in logging.getLogger().handlers
+                    if getattr(handler, mark, False)]
+
+        # the hook the session log chained onto when the panel was set up
+        previousHook = getattr(sessionLog, "_previous_excepthook", None)
+        CHECKS.check(len(gtreviewHandlers()) == 1,
+                     "precondition: one GTReview handler on the root logger",
+                     "{} handlers".format(len(gtreviewHandlers())))
+        CHECKS.check(previousHook is not None and sys.excepthook is not previousHook,
+                     "precondition: GTReview's exception hook is installed")
+        widget.cleanup()  # Slicer calls it again at exit; it must bear that
+        pump(0.1)
+        CHECKS.check(not gtreviewHandlers(), "no GTReview handler is left on the root logger",
+                     "{} handlers".format(len(gtreviewHandlers())))
+        CHECKS.check(sys.excepthook is previousHook, "sys.excepthook is the one from before",
+                     repr(sys.excepthook))
+        CHECKS.check(widget._watchdogTimer is None or not widget._watchdogTimer.isActive(),
+                     "the watchdog timer has stopped")
+        CHECKS.check(widget._errorLogModel is None, "Slicer's error log is no longer followed")
+        CHECKS.check(sessionLog.path is None, "and GTReview.log is closed")
 
 
 # --------------------------------------------------------------------------- #

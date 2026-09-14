@@ -28,7 +28,7 @@ Other guarantees:
 * ``read_mask`` always returns a C-contiguous **integer** array (float NIfTIs
   are rounded to nearest and cast; non-finite voxels become 0).
 * ``write_mask`` writes **atomically** (temp file in the destination directory
-  + ``os.replace``) so an interrupted save can never leave a truncated
+  + :func:`replace_file`) so an interrupted save can never leave a truncated
   ``.nii.gz`` behind, restores origin/spacing/direction bit-for-bit from the
   supplied :class:`MaskGeometry`, writes compressed, picks ``uint8`` unless a
   label exceeds 255 (then ``uint16``), and refuses negative labels.
@@ -46,6 +46,7 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
 
@@ -57,7 +58,12 @@ __all__ = [
     "read_mask",
     "read_geometry",
     "write_mask",
+    "replace_file",
+    "remove_file",
     "NIFTI_EXTENSIONS",
+    "RETRY_ON_PERMISSION_ERROR",
+    "RETRY_ATTEMPTS",
+    "RETRY_DELAY_S",
 ]
 
 #: Extensions ``write_mask`` accepts / ``read_mask`` expects.
@@ -65,6 +71,38 @@ NIFTI_EXTENSIONS = (".nii", ".nii.gz")
 
 #: Default tolerance for geometry comparisons (see module docstring).
 DEFAULT_TOL = 1e-4
+
+#: Retry a rename or delete that fails with ``PermissionError``.  On Windows a
+#: file that another process holds open without delete sharing -- a sync client
+#: (OneDrive, Dropbox) hashing a file that was just written, an antivirus
+#: scanner, ITK-SNAP with the mask loaded -- can be neither replaced nor
+#: removed until that process lets go, which usually takes a fraction of a
+#: second.  POSIX has no such lock: a ``PermissionError`` there is a real
+#: permission problem that waiting cannot fix, so the default is Windows only.
+#: The flag also covers clearing the read-only attribute in :func:`remove_file`,
+#: which is the other Windows-only reason a delete is refused.
+RETRY_ON_PERMISSION_ERROR = os.name == "nt"
+
+#: Total attempts, the first one included, before the last ``PermissionError``
+#: is raised.
+RETRY_ATTEMPTS = 8
+
+#: Pause between two attempts, in seconds.  Eight attempts 150 ms apart wait
+#: about a second in all, long enough for a scanner or sync client to finish
+#: with a mask-sized file and short enough that a lock which is not going away
+#: is reported while the reviewer still remembers pressing Save.
+RETRY_DELAY_S = 0.15
+
+#: Name prefix of the scratch file ``write_mask`` writes next to the
+#: destination.  Slicer's Windows build carries no longPathAware manifest, so
+#: every path it passes to the file API must stay under MAX_PATH (259
+#: characters).  A temp name longer than the destination's meant a reviewed mask
+#: whose path was just under that limit opened fine but could never be saved.
+#: With mkstemp's 8 random characters and the ``.nii.gz`` suffix the temp name
+#: is 20 characters, while the shortest reviewed-mask name,
+#: ``<case>_reviewed_seg.nii.gz``, is 21.  The leading dot keeps dataset
+#: discovery from offering a temp file a crash left behind as a volume.
+_TEMP_PREFIX = ".gtr-"
 
 
 def _as_float_tuple(values: Sequence[float]) -> Tuple[float, ...]:
@@ -289,6 +327,103 @@ def read_geometry(path: str) -> MaskGeometry:
 
 
 # ---------------------------------------------------------------------------
+# replacing and removing files
+# ---------------------------------------------------------------------------
+
+
+def _attempts() -> int:
+    """How many times an operation refused with PermissionError is tried."""
+    # Read at call time, not import time, so a caller or test that changes the
+    # module-level settings is honoured by the very next call.
+    if not RETRY_ON_PERMISSION_ERROR:
+        return 1
+    return max(1, int(RETRY_ATTEMPTS))
+
+
+def _pause_before_retry() -> None:
+    time.sleep(max(0.0, float(RETRY_DELAY_S)))
+
+
+def _clear_read_only(path: str) -> Optional[int]:
+    """Give *path* its owner write bit back; return the mode it had, or ``None``.
+
+    On Windows ``os.chmod`` maps that bit onto the read-only attribute, which
+    makes deleting the file, and renaming another file over it, fail with
+    "Access is denied".  ``None`` means nothing changed: the file was already
+    writable, does not exist, or refused the change.
+    """
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        if mode & stat.S_IWRITE:
+            return None
+        os.chmod(path, mode | stat.S_IWRITE)
+    except OSError:
+        return None
+    return mode
+
+
+def _restore_mode(path: str, mode: int) -> None:
+    # Best effort: the file operation this follows is what the caller asked
+    # for, and a mode that could not be put back must not turn it into an error.
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def replace_file(src: str, dst: str) -> None:
+    """``os.replace(src, dst)``, retried while another process holds a file.
+
+    While :data:`RETRY_ON_PERMISSION_ERROR` is true, a ``PermissionError`` is
+    retried up to :data:`RETRY_ATTEMPTS` attempts in all, :data:`RETRY_DELAY_S`
+    apart, and the last one is raised.  Any other ``OSError`` is raised at once:
+    a missing file or a full disk does not improve by waiting.
+
+    File attributes are left alone.  Windows refuses to replace a read-only
+    *dst* however long one waits; :func:`write_mask` clears that attribute
+    itself because it also knows which mode the new file should end up with.
+    """
+    src = os.fspath(src)
+    dst = os.fspath(dst)
+    attempts = _attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt >= attempts:
+                raise
+            _pause_before_retry()
+
+
+def remove_file(path: str) -> None:
+    """``os.remove(path)``, retried while another process holds the file.
+
+    Retries follow the same rules as :func:`replace_file`.  Windows also refuses
+    to delete a file with the read-only attribute, which no amount of waiting
+    fixes, so when the first attempt is refused and the file is read-only the
+    attribute is cleared before the remaining attempts.  If every attempt fails
+    the attribute is put back, so a delete that did not happen leaves the file
+    exactly as it was.
+    """
+    path = os.fspath(path)
+    attempts = _attempts()
+    cleared_mode = None
+    for attempt in range(1, attempts + 1):
+        try:
+            os.remove(path)
+            return
+        except PermissionError:
+            if attempt >= attempts:
+                if cleared_mode is not None:
+                    _restore_mode(path, cleared_mode)
+                raise
+            if cleared_mode is None:
+                cleared_mode = _clear_read_only(path)
+            _pause_before_retry()
+
+
+# ---------------------------------------------------------------------------
 # writing
 # ---------------------------------------------------------------------------
 
@@ -329,8 +464,11 @@ def write_mask(
     * The stored type is *dtype* (default ``uint8``), promoted to ``uint16``
       when a label exceeds 255.
     * The write is atomic: a temp file in the destination directory is written
-      and then ``os.replace``-d over *path*, so an interrupted or failing save
-      leaves the previous file intact and no partial ``.nii.gz`` behind.
+      and then moved over *path* with :func:`replace_file`, so an interrupted
+      or failing save leaves the previous file intact and no partial
+      ``.nii.gz`` behind.
+    * An existing *path* keeps its mode, read-only included; a read-only
+      destination is overwritten on Windows too.
     """
     path = os.fspath(path)
     geometry = MaskGeometry.coerce(geometry)
@@ -381,12 +519,10 @@ def write_mask(
          if lowered.endswith(ext)),
         ".nii.gz",
     )
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".{}.".format(os.path.basename(path)),
-        suffix=suffix,
-        dir=directory,
-    )
+    fd, tmp_path = tempfile.mkstemp(prefix=_TEMP_PREFIX, suffix=suffix, dir=directory)
     os.close(fd)
+    mode = None
+    cleared_mode = None
     try:
         try:
             sitk.WriteImage(image, tmp_path, suffix.endswith(".gz"))
@@ -395,16 +531,25 @@ def write_mask(
             writer.SetFileName(tmp_path)
             writer.SetUseCompression(suffix.endswith(".gz"))
             writer.Execute(image)
+        # Windows flushes a file through FlushFileBuffers, which needs a handle
+        # with write access: through a read-only one os.fsync failed there and
+        # the flush was skipped without a word.  No O_TRUNC, so the bytes just
+        # written stay, and O_BINARY because a descriptor Windows opens by
+        # number is in text mode unless told otherwise.
         try:
-            fd = os.open(tmp_path, os.O_RDONLY)
+            fd = os.open(tmp_path, os.O_WRONLY | getattr(os, "O_BINARY", 0))
             try:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        except OSError:  # pragma: no cover - fsync unsupported on some FS
+        except OSError:  # fsync unsupported on some FS
             pass
         # mkstemp creates 0600; keep the mode the file would have had (or the
-        # mode it already has, when overwriting a previous reviewed mask).
+        # mode it already has, when overwriting a previous reviewed mask) --
+        # except that the temp keeps its owner write bit until it has been
+        # renamed.  On Windows that bit is the read-only attribute, and a
+        # read-only temp could neither replace the destination nor be removed
+        # when the save failed, so it stayed behind next to the case.
         try:
             if os.path.exists(path):
                 mode = stat.S_IMODE(os.stat(path).st_mode)
@@ -412,13 +557,24 @@ def write_mask(
                 umask = os.umask(0)
                 os.umask(umask)
                 mode = 0o666 & ~umask
-            os.chmod(tmp_path, mode)
+            os.chmod(tmp_path, mode | stat.S_IWRITE)
         except OSError:  # pragma: no cover - chmod unsupported on some FS
             pass
-        os.replace(tmp_path, path)
+        # Windows also refuses to replace a read-only destination, so a
+        # reviewed mask that someone, a sync tool or a copy from read-only
+        # media marked read-only made every later save fail.  The attribute is
+        # cleared for the rename and put back on the new file below, which is
+        # what POSIX, where a rename over a read-only file just works, already
+        # ends up with.
+        cleared_mode = _clear_read_only(path)
+        replace_file(tmp_path, path)
     except BaseException:
+        if cleared_mode is not None:
+            _restore_mode(path, cleared_mode)
         try:
-            os.unlink(tmp_path)
-        except OSError:  # pragma: no cover
+            remove_file(tmp_path)
+        except OSError:
             pass
         raise
+    if mode is not None and not mode & stat.S_IWRITE:
+        _restore_mode(path, mode)

@@ -5,10 +5,14 @@ Run with::
     PythonSlicer -m unittest discover -s Testing -p 'test_maskio.py' -v
 """
 
+import contextlib
+import errno
 import os
+import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 import SimpleITK as sitk
@@ -467,6 +471,464 @@ class AtomicityTest(unittest.TestCase):
         nested = os.path.join(self.tmpdir, "sub", "dir", "m.nii.gz")
         write_mask(nested, np.zeros(self.geom.size, np.uint8), self.geom)
         self.assertTrue(os.path.exists(nested))
+
+    @contextlib.contextmanager
+    def recorded_fsyncs(self, fsync_error=None):
+        """Record every ``os.open`` and ``os.fsync`` while write_mask runs.
+
+        ``opens`` holds ``(path, flags, fd)``; ``fsyncs`` holds
+        ``(fd, flags that fd was opened with, path)``.  With *fsync_error* each
+        fsync raises it instead of flushing.
+        """
+        real_open, real_fsync = os.open, os.fsync
+        opens, fsyncs = [], []
+
+        def recording_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            opens.append((os.fspath(path), flags, fd))
+            return fd
+
+        def recording_fsync(fd):
+            opened = [(flags, path) for path, flags, number in opens if number == fd]
+            flags, path = opened[-1] if opened else (None, None)
+            fsyncs.append((fd, flags, path))
+            if fsync_error is not None:
+                raise fsync_error
+            return real_fsync(fd)
+
+        with mock.patch.object(maskio.os, "open", recording_open), \
+                mock.patch.object(maskio.os, "fsync", recording_fsync):
+            yield opens, fsyncs
+
+    def test_the_temp_is_flushed_through_a_writable_descriptor(self):
+        # Windows refuses to flush through a read-only handle, and the save
+        # used to skip the flush there without a word
+        with self.recorded_fsyncs() as (opens, fsyncs):
+            write_mask(self.path, np.ones(self.geom.size, np.uint8), self.geom)
+
+        self.assertEqual(len(fsyncs), 1)
+        fd, flags, path = fsyncs[0]
+        self.assertIsNotNone(flags, "fsync got a descriptor write_mask did not open")
+        self.assertEqual(os.path.dirname(path), self.tmpdir)
+        self.assertTrue(os.path.basename(path).startswith(".gtr-"), path)
+        self.assertTrue(flags & (os.O_WRONLY | os.O_RDWR), oct(flags))
+        # opening it must not truncate what SimpleITK just wrote
+        self.assertFalse(flags & getattr(os, "O_TRUNC", 0), oct(flags))
+        self.assertEqual(flags & getattr(os, "O_BINARY", 0), getattr(os, "O_BINARY", 0))
+        np.testing.assert_array_equal(
+            read_mask(self.path)[0], np.ones(self.geom.size, np.uint8)
+        )
+        self.assertEqual(sorted(os.listdir(self.tmpdir)), ["case_reviewed_seg.nii.gz"])
+
+    def test_a_filesystem_without_fsync_still_saves(self):
+        error = OSError(errno.EINVAL, "Invalid argument")
+        with self.recorded_fsyncs(fsync_error=error) as (opens, fsyncs):
+            write_mask(self.path, np.ones(self.geom.size, np.uint8), self.geom)
+        self.assertEqual(len(fsyncs), 1)
+        # the descriptor is closed even though the flush failed; checked before
+        # read_mask can open anything under the same number
+        with self.assertRaises(OSError):
+            os.fstat(fsyncs[0][0])
+        np.testing.assert_array_equal(
+            read_mask(self.path)[0], np.ones(self.geom.size, np.uint8)
+        )
+        self.assertEqual(sorted(os.listdir(self.tmpdir)), ["case_reviewed_seg.nii.gz"])
+
+
+# The real functions, captured before any test patches them, so a stand-in can
+# refuse some calls and hand the rest on.
+REAL_REPLACE = os.replace
+REAL_REMOVE = os.remove
+
+RETRY_SETTINGS = ("RETRY_ON_PERMISSION_ERROR", "RETRY_ATTEMPTS", "RETRY_DELAY_S")
+
+
+def refused(times, real, error=None):
+    """A stand-in for ``os.replace`` / ``os.remove`` that fails *times* times.
+
+    Until then every call raises *error* (by default the ``PermissionError``
+    Windows gives while another process holds the file); later calls go to
+    *real*.  ``fake.calls`` records the arguments of every call.
+    """
+    calls = []
+
+    def fake(*args):
+        calls.append(args)
+        if len(calls) <= times:
+            if error is not None:
+                raise error
+            raise PermissionError(
+                errno.EACCES,
+                "The process cannot access the file because it is being used "
+                "by another process",
+                args[-1],
+            )
+        return real(*args)
+
+    fake.calls = calls
+    return fake
+
+
+def is_read_only(path):
+    return not os.stat(path).st_mode & stat.S_IWUSR
+
+
+def comparable_mode(mode):
+    """The part of *mode* this platform keeps.
+
+    Windows stores only a read-only attribute and reports every file as 0o666
+    or 0o444, so a 0o640 set there can only be checked by its owner write bit.
+    """
+    return mode & stat.S_IWUSR if os.name == "nt" else mode
+
+
+def windows_replace(src, dst):
+    """``os.replace`` as ``MoveFileEx`` behaves: a read-only destination is refused."""
+    if os.path.exists(dst) and is_read_only(dst):
+        raise PermissionError(errno.EACCES, "Access is denied", dst)
+    return REAL_REPLACE(src, dst)
+
+
+def windows_remove(path):
+    """``os.remove`` as ``DeleteFile`` behaves: a read-only file is refused."""
+    if is_read_only(path):  # a missing file raises FileNotFoundError, as os.remove does
+        raise PermissionError(errno.EACCES, "Access is denied", path)
+    return REAL_REMOVE(path)
+
+
+@contextlib.contextmanager
+def windows_file_semantics():
+    """Make renames and deletes refuse read-only files the way Windows does."""
+    with mock.patch.object(maskio.os, "replace", windows_replace), \
+            mock.patch.object(maskio.os, "remove", windows_remove):
+        yield
+
+
+class RetrySettingsMixin:
+    """Restores maskio's retry settings after each test and records the pauses.
+
+    ``time.sleep`` is replaced for the test, so ``self.sleep`` holds one call
+    per pause and no test actually waits.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.saved_settings = {name: getattr(maskio, name) for name in RETRY_SETTINGS}
+
+        def restore():
+            for name, value in self.saved_settings.items():
+                setattr(maskio, name, value)
+
+        self.addCleanup(restore)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmpdir = self._tmp.name
+        maskio.RETRY_ATTEMPTS = 8
+        maskio.RETRY_DELAY_S = 0.125
+        patcher = mock.patch.object(maskio.time, "sleep")
+        self.sleep = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_bytes(self, name, payload):
+        path = os.path.join(self.tmpdir, name)
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        return path
+
+    def read_bytes(self, path):
+        with open(path, "rb") as handle:
+            return handle.read()
+
+
+class RetryDefaultsTest(RetrySettingsMixin, unittest.TestCase):
+    def test_retrying_is_on_for_windows_only(self):
+        self.assertEqual(self.saved_settings["RETRY_ON_PERMISSION_ERROR"], os.name == "nt")
+
+    def test_defaults_wait_about_a_second(self):
+        self.assertGreaterEqual(self.saved_settings["RETRY_ATTEMPTS"], 5)
+        self.assertLessEqual(self.saved_settings["RETRY_ATTEMPTS"], 10)
+        self.assertGreaterEqual(self.saved_settings["RETRY_DELAY_S"], 0.1)
+        self.assertLessEqual(self.saved_settings["RETRY_DELAY_S"], 0.2)
+
+
+class ReplaceFileTest(RetrySettingsMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.src = self.write_bytes(".gtr-new.nii.gz", b"new")
+        self.dst = self.write_bytes("case_reviewed_seg.nii.gz", b"old")
+
+    def test_replaces_the_destination(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        maskio.replace_file(self.src, self.dst)
+        self.assertEqual(self.read_bytes(self.dst), b"new")
+        self.assertFalse(os.path.exists(self.src))
+        self.sleep.assert_not_called()
+
+    def test_retries_until_the_other_process_lets_go(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        fake = refused(3, REAL_REPLACE)
+        with mock.patch.object(maskio.os, "replace", fake):
+            maskio.replace_file(self.src, self.dst)
+        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(self.read_bytes(self.dst), b"new")
+        self.assertFalse(os.path.exists(self.src))
+        self.assertEqual(self.sleep.call_args_list, [mock.call(0.125)] * 3)
+
+    def test_gives_up_after_retry_attempts(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        maskio.RETRY_ATTEMPTS = 5
+        fake = refused(100, REAL_REPLACE)
+        with mock.patch.object(maskio.os, "replace", fake):
+            with self.assertRaises(PermissionError):
+                maskio.replace_file(self.src, self.dst)
+        self.assertEqual(len(fake.calls), 5)
+        self.assertEqual(self.sleep.call_count, 4)
+        self.assertEqual(self.read_bytes(self.dst), b"old")
+        self.assertEqual(self.read_bytes(self.src), b"new")
+
+    def test_does_not_retry_when_the_flag_is_off(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = False
+        fake = refused(1, REAL_REPLACE)
+        with mock.patch.object(maskio.os, "replace", fake):
+            with self.assertRaises(PermissionError):
+                maskio.replace_file(self.src, self.dst)
+        self.assertEqual(len(fake.calls), 1)
+        self.sleep.assert_not_called()
+        self.assertEqual(self.read_bytes(self.dst), b"old")
+
+    def test_other_os_errors_are_not_retried(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        for error in (OSError(errno.EIO, "I/O error"), OSError(errno.ENOSPC, "No space left")):
+            with self.subTest(errno=error.errno):
+                fake = refused(1, REAL_REPLACE, error=error)
+                with mock.patch.object(maskio.os, "replace", fake):
+                    with self.assertRaises(OSError) as ctx:
+                        maskio.replace_file(self.src, self.dst)
+                self.assertIs(ctx.exception, error)
+                self.assertEqual(len(fake.calls), 1)
+        with self.assertRaises(FileNotFoundError):
+            maskio.replace_file(os.path.join(self.tmpdir, "missing.nii.gz"), self.dst)
+        self.sleep.assert_not_called()
+
+
+class RemoveFileTest(RetrySettingsMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.path = self.write_bytes("case_reviewed_seg.nii.gz", b"review")
+
+    def tearDown(self):
+        if os.path.exists(self.path):
+            os.chmod(self.path, 0o600)
+
+    def test_removes_the_file(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        maskio.remove_file(self.path)
+        self.assertFalse(os.path.exists(self.path))
+        self.sleep.assert_not_called()
+
+    def test_retries_until_the_other_process_lets_go(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        fake = refused(2, REAL_REMOVE)
+        with mock.patch.object(maskio.os, "remove", fake):
+            maskio.remove_file(self.path)
+        self.assertEqual(len(fake.calls), 3)
+        self.assertFalse(os.path.exists(self.path))
+        self.assertEqual(self.sleep.call_args_list, [mock.call(0.125)] * 2)
+
+    def test_gives_up_after_retry_attempts(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        maskio.RETRY_ATTEMPTS = 6
+        fake = refused(100, REAL_REMOVE)
+        with mock.patch.object(maskio.os, "remove", fake):
+            with self.assertRaises(PermissionError):
+                maskio.remove_file(self.path)
+        self.assertEqual(len(fake.calls), 6)
+        self.assertEqual(self.sleep.call_count, 5)
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_does_not_retry_when_the_flag_is_off(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = False
+        fake = refused(1, REAL_REMOVE)
+        with mock.patch.object(maskio.os, "remove", fake):
+            with self.assertRaises(PermissionError):
+                maskio.remove_file(self.path)
+        self.assertEqual(len(fake.calls), 1)
+        self.sleep.assert_not_called()
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_other_os_errors_are_not_retried(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        error = OSError(errno.EIO, "I/O error")
+        fake = refused(1, REAL_REMOVE, error=error)
+        with mock.patch.object(maskio.os, "remove", fake):
+            with self.assertRaises(OSError) as ctx:
+                maskio.remove_file(self.path)
+        self.assertIs(ctx.exception, error)
+        self.assertEqual(len(fake.calls), 1)
+        with self.assertRaises(FileNotFoundError):
+            maskio.remove_file(os.path.join(self.tmpdir, "missing.nii.gz"))
+        self.sleep.assert_not_called()
+
+    def test_clears_the_read_only_attribute(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        os.chmod(self.path, 0o444)
+        with windows_file_semantics():
+            maskio.remove_file(self.path)
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_a_delete_that_never_happens_keeps_the_file_read_only(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        os.chmod(self.path, 0o444)
+        fake = refused(100, REAL_REMOVE)
+        with mock.patch.object(maskio.os, "remove", fake):
+            with self.assertRaises(PermissionError):
+                maskio.remove_file(self.path)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o444)
+        self.assertEqual(self.read_bytes(self.path), b"review")
+
+    def test_a_writable_locked_file_keeps_its_mode(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        os.chmod(self.path, 0o640)
+        fake = refused(100, REAL_REMOVE)
+        with mock.patch.object(maskio.os, "remove", fake):
+            with self.assertRaises(PermissionError):
+                maskio.remove_file(self.path)
+        self.assertEqual(comparable_mode(stat.S_IMODE(os.stat(self.path).st_mode)),
+                         comparable_mode(0o640))
+
+    def test_read_only_is_left_alone_when_the_flag_is_off(self):
+        maskio.RETRY_ON_PERMISSION_ERROR = False
+        os.chmod(self.path, 0o444)
+        with windows_file_semantics():
+            with self.assertRaises(PermissionError):
+                maskio.remove_file(self.path)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o444)
+
+
+class WindowsSavingTest(RetrySettingsMixin, unittest.TestCase):
+    """write_mask against the file semantics of Windows."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(self.tmpdir, "case_reviewed_seg.nii.gz")
+        self.geom = MaskGeometry(**EXACT_GEOMETRY)
+        self.first = np.zeros(self.geom.size, np.uint8)
+        self.first[0, 0, 0] = 2
+        self.second = np.ones(self.geom.size, np.uint8)
+
+    def tearDown(self):
+        if os.path.exists(self.path):
+            os.chmod(self.path, 0o600)
+
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    @contextlib.contextmanager
+    def recorded_replaces(self):
+        """Record ``(temp path, temp mode)`` for every replace write_mask makes."""
+        original = maskio.replace_file
+        records = []
+
+        def recording(src, dst):
+            records.append((src, dst, stat.S_IMODE(os.stat(src).st_mode)))
+            return original(src, dst)
+
+        with mock.patch.object(maskio, "replace_file", recording):
+            yield records
+
+    def test_overwrites_a_read_only_reviewed_mask(self):
+        for flag in (True, False):
+            with self.subTest(retry=flag):
+                maskio.RETRY_ON_PERMISSION_ERROR = flag
+                if os.path.exists(self.path):
+                    os.chmod(self.path, 0o600)
+                write_mask(self.path, self.first, self.geom)
+                os.chmod(self.path, 0o444)
+
+                with windows_file_semantics(), self.recorded_replaces() as records:
+                    write_mask(self.path, self.second, self.geom)
+
+                np.testing.assert_array_equal(read_mask(self.path)[0], self.second)
+                self.assertEqual(self.mode(self.path), 0o444)
+                self.assertEqual(os.listdir(self.tmpdir), [os.path.basename(self.path)])
+                self.assertEqual(len(records), 1)
+                # the temp never carried the read-only mode into the rename
+                self.assertTrue(records[0][2] & stat.S_IWUSR)
+                self.assertEqual(comparable_mode(records[0][2] & ~stat.S_IWUSR),
+                                 comparable_mode(0o444 & ~stat.S_IWUSR))
+
+    def test_overwrite_keeps_a_writable_mode(self):
+        write_mask(self.path, self.first, self.geom)
+        os.chmod(self.path, 0o640)
+        write_mask(self.path, self.second, self.geom)
+        self.assertEqual(comparable_mode(self.mode(self.path)), comparable_mode(0o640))
+
+    def test_failed_replace_cleans_up_and_keeps_the_read_only_mask(self):
+        write_mask(self.path, self.first, self.geom)
+        os.chmod(self.path, 0o444)
+        before = self.read_bytes(self.path)
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        maskio.RETRY_ATTEMPTS = 3
+        locked = refused(100, REAL_REPLACE)
+
+        with windows_file_semantics(), mock.patch.object(maskio.os, "replace", locked):
+            with self.assertRaises(PermissionError):
+                write_mask(self.path, self.second, self.geom)
+
+        self.assertEqual(len(locked.calls), 3)
+        self.assertEqual(os.listdir(self.tmpdir), [os.path.basename(self.path)])
+        self.assertEqual(self.read_bytes(self.path), before)
+        self.assertEqual(self.mode(self.path), 0o444)
+
+    def test_failed_write_next_to_a_read_only_mask_leaves_no_temp(self):
+        write_mask(self.path, self.first, self.geom)
+        os.chmod(self.path, 0o444)
+        before = self.read_bytes(self.path)
+
+        def exploding_write(*args, **kwargs):
+            with open(args[1], "wb") as handle:
+                handle.write(b"\x1f\x8b truncated garbage")
+            raise RuntimeError("disk went away")
+
+        with windows_file_semantics(), \
+                mock.patch.object(maskio.sitk, "WriteImage", exploding_write):
+            with self.assertRaises(RuntimeError):
+                write_mask(self.path, self.second, self.geom)
+
+        self.assertEqual(os.listdir(self.tmpdir), [os.path.basename(self.path)])
+        self.assertEqual(self.read_bytes(self.path), before)
+        self.assertEqual(self.mode(self.path), 0o444)
+
+    def test_rides_out_a_transient_lock_on_the_destination(self):
+        write_mask(self.path, self.first, self.geom)
+        maskio.RETRY_ON_PERMISSION_ERROR = True
+        locked = refused(2, REAL_REPLACE)
+        with mock.patch.object(maskio.os, "replace", locked):
+            write_mask(self.path, self.second, self.geom)
+        self.assertEqual(len(locked.calls), 3)
+        self.assertEqual(os.listdir(self.tmpdir), [os.path.basename(self.path)])
+        np.testing.assert_array_equal(read_mask(self.path)[0], self.second)
+
+    def test_temp_name_is_short_and_next_to_the_destination(self):
+        # Slicer on Windows has no long-path support, so the temp path must not
+        # be longer than the reviewed path it is renamed to.
+        names = (
+            "a_reviewed_seg.nii.gz",
+            "a_reviewed_seg.nii",
+            "YG_78CQZ7VA3H2G_27_reviewed_seg.nii.gz",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                path = os.path.join(self.tmpdir, name)
+                with self.recorded_replaces() as records:
+                    write_mask(path, self.first, self.geom)
+                self.assertEqual(len(records), 1)
+                temp = records[0][0]
+                self.assertEqual(os.path.dirname(temp), os.path.dirname(os.path.abspath(path)))
+                self.assertTrue(os.path.basename(temp).startswith(".gtr-"), temp)
+                self.assertTrue(temp.endswith(".nii.gz" if name.endswith(".gz") else ".nii"))
+                self.assertLessEqual(len(temp), len(os.path.abspath(path)))
+                os.remove(path)
 
 
 @unittest.skipUnless(os.path.exists(REAL_SEG), "real sample data not available")
