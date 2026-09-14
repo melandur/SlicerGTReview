@@ -83,9 +83,9 @@ from a share.
   they land on the same stack as brush strokes.
 - **Undo stays inside a memory budget** — every undo state is a copy of the
   mask, so the history is capped at 1 GiB (`UNDO_MEMORY_BUDGET_MB`) rather
-  than at a fixed number of steps. Small masks keep the full 200 states; on a
-  large one the oldest states are dropped first and fewer steps remain, never
-  fewer than 5. The cap is only lowered when there is nothing to redo, and a
+  than at a fixed number of steps. The history holds at most 5000 states, and
+  with Live fill a stroke uses about 100 of them. On a large mask the oldest
+  states are dropped first and fewer steps remain, never fewer than 5. The cap is only lowered when there is nothing to redo, and a
   fresh case starts from the full depth again.
 - **Delete review** — next to the mask-source picker, enabled only when the case
   has a saved `reviewed_seg`. It removes that file from disk and reopens the

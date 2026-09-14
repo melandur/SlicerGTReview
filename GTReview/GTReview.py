@@ -1564,10 +1564,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.editor = segmentationWidgets.qMRMLSegmentEditorWidget()
         # Painting is immediate (see _applyImmediatePaint), and Slicer saves an
-        # undo state per brush stamp rather than per stroke, so one drag can eat
-        # a dozen states.  200 covers a full pass over a small case; each state
-        # is a labelmap copy, so _enforceUndoBudget lowers this for large masks
-        # to keep the history inside UNDO_MEMORY_BUDGET_MB.
+        # undo state per mouse move while painting rather than per stroke, so
+        # one real drag eats about a hundred states: 200 undid a single stroke.
+        # Each state is a labelmap copy, so _enforceUndoBudget lowers this for
+        # large masks to keep the history inside UNDO_MEMORY_BUDGET_MB.
         self.editor.setMaximumNumberOfUndoStates(self.MAX_UNDO_STATES)
         # setUndoEnabled(True) CLEARS the undo history every time it is called
         # (verified on 5.10), so it runs exactly once, here, before any edit.
@@ -2849,7 +2849,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Keep the history in budget while a Live fill stroke grows the mask.
 
         Without this a long drag that reaches past the labelmap's edge would
-        save a dozen ever-larger states before the button comes up.  It runs
+        save about a hundred ever-larger states before the button comes up.  It runs
         ahead of the effects, so it sees the mask as the previous stamp left
         it; the close on mouse-up measures the last one.
         """
@@ -4382,8 +4382,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._refreshTimer is not None and self.autoRefreshCheckBox.checked:
             self._refreshTimer.start(self.LESION_REFRESH_DEBOUNCE_MS)
 
-    #: how many history states Slicer keeps at most (one per brush stamp with Live fill)
-    MAX_UNDO_STATES = 200
+    #: how many history states Slicer keeps at most; with Live fill a stroke
+    #: is one per mouse move (~100), so this is dozens of strokes, and the
+    #: memory budget below is what really bounds the history
+    MAX_UNDO_STATES = 5000
     #: memory the undo history may hold, in MiB; past it the oldest states go
     UNDO_MEMORY_BUDGET_MB = 1024
     #: undo states kept even when one state is a large share of the budget
@@ -4398,8 +4400,11 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     )
     #: how many identical history states one Undo/Redo press will step over
     HISTORY_SKIP_LIMIT = 4
-    #: how far Undo will walk back looking for the start of a stroke
-    HISTORY_STROKE_LIMIT = MAX_UNDO_STATES
+    #: how far one Undo press walks looking for the start of a stroke: about
+    #: ten real strokes.  Bounded on its own, because a press whose mark no kept
+    #: state matches (a stroke painted outside the slice views leaves none)
+    #: would otherwise walk the whole history, seconds at 5000 states
+    HISTORY_STROKE_LIMIT = 1000
     #: how many stroke starts are remembered
     MAX_STROKE_MARKS = MAX_UNDO_STATES
 
