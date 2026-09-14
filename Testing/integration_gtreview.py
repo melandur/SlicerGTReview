@@ -840,6 +840,23 @@ class GTReviewIntegrationTest(unittest.TestCase):
     def test_06_sphere_threshold_2d(self):
         CHECKS.step("Sphere threshold: a ball, then a disc with 2D ticked")
         widget = self.widget
+        lesion = widget.selectedLesion()
+        combo = widget.activeLabelComboBox
+        combo.currentIndex = combo.findData(3)
+        widget.onActiveLabelChanged(combo.currentIndex)
+        widget.onActivateEffect(gtreview.SPHERE_THRESHOLD_EFFECT)  # what the 3 key calls
+        pump()
+        segmentLabel = widget.logic.labelValueForSegmentId(widget.editor.currentSegmentID())
+        CHECKS.check(
+            combo.itemData(combo.currentIndex) == 3 and segmentLabel == 3,
+            "choosing a tool by its key keeps the label picked in Active label",
+            "box {}, editor segment {}, selected lesion's label {}".format(
+                combo.itemData(combo.currentIndex), segmentLabel,
+                None if lesion is None else int(lesion.label)),
+        )
+        if lesion is not None:
+            widget._selectSegmentForLabel(int(lesion.label))
+            pump(0.1)
         widget.onActivateEffect(gtreview.SPHERE_THRESHOLD_EFFECT)
         pump()
         effect = widget.editor.activeEffect()

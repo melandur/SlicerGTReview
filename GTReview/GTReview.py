@@ -3679,9 +3679,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._selectSegmentForLabel(int(value))
         # Coming back from Background: leaving Erase armed would keep taking
         # voxels away while the box says a label is being painted.  The effect
-        # is switched directly rather than through onActivateEffect, which
-        # re-selects the segment of the currently selected lesion and would
-        # undo the label just picked here.
+        # is switched directly, without onActivateEffect's edit gate and brush
+        # set-up, which Erase already went through.
         effect = self.editor.activeEffect() if self.editor is not None else None
         if effect is not None and effect.name == "Erase":
             self.editor.setActiveEffectByName("Paint")
@@ -4216,15 +4215,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "GTReview: select a lesion, or start a new one, before editing.", 3000
             )
             return
+        # The label stays whatever Active label says: selecting a lesion already
+        # set it to that lesion's, and a label the reviewer picked since then is
+        # deliberate (resetting it here turned Edema back into Necrosis on every
+        # press of 3).  Only New lesion mode brings its own label.
         if self._newLesion is not None:
             self._selectSegmentForLabel(self._newLesion["label"])
-        else:
-            lesion = self.selectedLesion()
-            if lesion is not None:
-                self._selectSegmentForLabel(lesion.label)
         self.editor.setActiveEffectByName(name)
-        # the segment was selected above, before the effect changed, so the
-        # sync it triggered could not know Erase was about to become active
+        # switching to or from Erase changes what the Active label box shows
         self._syncActiveLabelComboBox()
         self._applyImmediatePaint()
         self._initialiseBrush()
