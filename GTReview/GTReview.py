@@ -930,7 +930,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     #: the only effects offered in the brush grid
     EDITOR_EFFECTS = ("Paint", "Erase", SPHERE_THRESHOLD_EFFECT)
     #: brush is always absolute; lesions here are tiny (median 26 voxels)
-    BRUSH_MM = 3.0
+    BRUSH_MM = 2.0
     BRUSH_MIN_MM = 1.0
     BRUSH_MAX_MM = 20.0
     BRUSH_STEP_MM = 1.0

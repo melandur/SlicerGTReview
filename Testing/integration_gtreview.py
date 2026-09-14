@@ -439,6 +439,9 @@ class GTReviewIntegrationTest(unittest.TestCase):
         effect = widget.editor.activeEffect()
         CHECKS.check(effect is not None and effect.name == "Paint",
                      "the Paint effect is active")
+        CHECKS.check(abs(effect.doubleParameter("BrushAbsoluteDiameter") - widget.BRUSH_MM) < 1e-6,
+                     "the brush starts at {:g} mm".format(widget.BRUSH_MM),
+                     "{} mm".format(effect.doubleParameter("BrushAbsoluteDiameter")))
 
         red = sliceWidgetNamed("Red")
         startRas = widget.logic.centroidToRAS(PAINT_START_IJK)
@@ -493,6 +496,10 @@ class GTReviewIntegrationTest(unittest.TestCase):
         pump(0.1)
         CHECKS.check(widget.editor.activeEffect().delayedPaint,
                      "and a newly activated brush follows the box")
+        eraseMm = widget.editor.activeEffect().doubleParameter("BrushAbsoluteDiameter")
+        CHECKS.check(abs(eraseMm - widget.BRUSH_MM) < 1e-6,
+                     "Erase shares the {:g} mm brush".format(widget.BRUSH_MM),
+                     "{} mm".format(eraseMm))
         widget.liveFillCheckBox.checked = True
         pump(0.1)
         CHECKS.check(not widget.editor.activeEffect().delayedPaint,
