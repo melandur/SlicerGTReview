@@ -47,6 +47,11 @@
 #   --slicer-version  major.minor, e.g. 5.10, when building without a --slicer
 #   --output          where to write the archive (default: <repo>/Packages)
 #
+# Output: <output>/GTReview-for-Slicer-<version>-<os>-amd64-<git describe>.tar.gz
+#   <version> is major.minor on Linux and Windows (the package serves every
+#   patch release of it) and the exact releases on macOS, e.g. 5.12.3-and-5.12.4.
+#   Slicer never reads the file name, so it is there for the person picking one.
+#
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -186,7 +191,33 @@ RESOURCES=(Resources/Icons/"$EXTENSION_NAME".png)
 # under the bundle path the mac branch of extractExtensionArchive looks for.
 # ---------------------------------------------------------------------------
 IFS=, read -r -a REVISIONS <<< "$REVISION"
-ARCHIVE_BASE="$(IFS=+; echo "${REVISIONS[*]}")-${TARGET_OS}-amd64-${EXTENSION_NAME}-${VERSION}"
+
+# Slicer release of a revision, for the file name.  Unknown revisions keep
+# their number (5.12-r34700) rather than guessing a release.
+release_for_revision() {
+    case "$1" in
+        34045) echo 5.10.0 ;;
+        34627) echo 5.12.3 ;;
+        34645) echo 5.12.4 ;;
+        *) echo "${SLICER_MINOR}-r$1" ;;
+    esac
+}
+if [ "$TARGET_OS" = macosx ]; then
+    RELEASES=()
+    for rev in "${REVISIONS[@]}"; do
+        release="$(release_for_revision "$rev")"
+        case "$release" in
+            "$SLICER_MINOR".*|"$SLICER_MINOR"-r*) ;;
+            *) echo "error: revision $rev is Slicer $release, not $SLICER_MINOR" >&2; exit 2 ;;
+        esac
+        RELEASES+=("$release")
+    done
+    SLICER_LABEL="$(printf '%s-and-' "${RELEASES[@]}")"
+    SLICER_LABEL="${SLICER_LABEL%-and-}"
+else
+    SLICER_LABEL="$SLICER_MINOR"
+fi
+ARCHIVE_BASE="${EXTENSION_NAME}-for-Slicer-${SLICER_LABEL}-${TARGET_OS}-amd64-${VERSION}"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/$ARCHIVE_BASE"
@@ -248,7 +279,11 @@ tar -czf "$ARCHIVE" -C "$STAGE" "$ARCHIVE_BASE"
 echo "built $ARCHIVE"
 echo
 echo "  extension   $EXTENSION_NAME $VERSION"
-echo "  target      $TARGET_OS, Slicer $SLICER_MINOR, revision $REVISION"
+if [ "$TARGET_OS" = macosx ]; then
+    echo "  target      macosx, Slicer ${RELEASES[*]} (revision ${REVISIONS[*]})"
+else
+    echo "  target      $TARGET_OS, Slicer $SLICER_MINOR (any $SLICER_MINOR.x)"
+fi
 echo "  files       ${#SCRIPTS[@]} scripts + ${#RESOURCES[@]} resource(s)"
 if [ "$TARGET_OS" = macosx ]; then
     echo "  note        macOS packages are tied to the revision(s) $REVISION, not just to $SLICER_MINOR"
