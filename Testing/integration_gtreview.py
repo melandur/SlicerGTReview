@@ -20,7 +20,10 @@ interactors.  On a synthetic case (numpy + SimpleITK, never patient data) it
    Redo press (a stroke is one gesture, not one undo state per brush stamp),
    then squeezes the undo memory budget: the history keeps no more states than
    the budget allows, drops the oldest first, still redoes cleanly, never
-   lowers the cap while redo states exist, and Undo presses run out cleanly,
+   lowers the cap while redo states exist, and Undo presses run out cleanly;
+   then queues a burst of Undo clicks at the end of the history with the brush
+   locked and checks the panel stays responsive (one failed step per press, no
+   nested presses, one lesion recount after the burst, no key autorepeat),
 5. drags the Sphere threshold effect with "2D: this slice only" off and then
    on, and checks the 2D result never leaves the slice it was drawn on,
 6. deletes a lesion with its row's trash button, confirmation stubbed,
@@ -666,6 +669,160 @@ class GTReviewIntegrationTest(unittest.TestCase):
         CHECKS.check(editor.maximumNumberOfUndoStates == widget.MAX_UNDO_STATES,
                      "and a fresh case starts from the full depth again",
                      "cap {}".format(editor.maximumNumberOfUndoStates))
+
+    def test_05c_rapid_undo_presses(self):
+        CHECKS.step("Clicking Undo fast at the end of the history does not freeze the panel")
+        widget = self.widget
+        editor = widget.editor
+        loaded = widget.logic.exportLabelmapArrayIJK()
+        red = sliceWidgetNamed("Red")
+        clicks = 25
+        stats = {"presses": 0, "depth": 0, "maxDepth": 0, "tries": 0, "failed": 0,
+                 "refreshes": 0, "refreshing": 0, "pressesInsideRecount": 0}
+        gap = {"last": time.time(), "max": 0.0}
+        timer = qt.QTimer()
+        originalStepHistory = widget._stepHistory
+        originalRefresh = widget.refreshLesions
+        # the test's own count of segmentation events: a raw undo that raises
+        # none found nothing to undo (and logged a warning for it)
+        events = {"n": 0}
+        observed = []
+
+        def countEvent(caller, event):
+            events["n"] += 1
+
+        def stepHistory(step, *args):
+            def countedStep():
+                stats["tries"] += 1
+                before = events["n"]
+                step()
+                if events["n"] == before:
+                    stats["failed"] += 1
+
+            stats["presses"] += 1
+            if stats["refreshing"]:
+                # the recount's busy cursor pumps events: a queued click ran here
+                stats["pressesInsideRecount"] += 1
+            stats["depth"] += 1
+            stats["maxDepth"] = max(stats["maxDepth"], stats["depth"])
+            try:
+                return originalStepHistory(countedStep, *args)
+            finally:
+                stats["depth"] -= 1
+
+        def refreshLesions():
+            stats["refreshes"] += 1
+            stats["refreshing"] += 1
+            try:
+                return originalRefresh()
+            finally:
+                stats["refreshing"] -= 1
+
+        def tick():
+            now = time.time()
+            gap["max"] = max(gap["max"], now - gap["last"])
+            gap["last"] = now
+
+        def postClick():
+            button = widget.undoButton
+            centre = qt.QPointF(button.width / 2.0, button.height / 2.0)
+            qt.QApplication.postEvent(button, qt.QMouseEvent(
+                qt.QEvent.MouseButtonPress, centre, qt.Qt.LeftButton, qt.Qt.LeftButton,
+                qt.Qt.NoModifier))
+            qt.QApplication.postEvent(button, qt.QMouseEvent(
+                qt.QEvent.MouseButtonRelease, centre, qt.Qt.LeftButton, qt.Qt.NoButton,
+                qt.Qt.NoModifier))
+
+        try:
+            for shortcut in widget._shortcuts:
+                keys = shortcut.key.toString()
+                if keys in ("Ctrl+Z", "Ctrl+Y", "Ctrl+Shift+Z"):
+                    CHECKS.check(not shortcut.autoRepeat,
+                                 "{} does not autorepeat while held".format(keys))
+
+            widget.onActivateEffect("Paint")
+            pump()
+            widget.UNDO_MEMORY_BUDGET_MB = 1e-6  # the history floors at a few states
+            for offset in (0, 3, 6, 9):
+                startRas = widget.logic.centroidToRAS(
+                    (PAINT_START_IJK[0], PAINT_START_IJK[1] + offset, PAINT_START_IJK[2]))
+                endRas = widget.logic.centroidToRAS(
+                    (PAINT_END_IJK[0], PAINT_START_IJK[1] + offset, PAINT_END_IJK[2]))
+                dragBetween(red, startRas, endRas)
+            CHECKS.check(editor.maximumNumberOfUndoStates == widget.MIN_UNDO_STATES,
+                         "precondition: the history is down to its floor",
+                         "cap {}".format(editor.maximumNumberOfUndoStates))
+            CHECKS.check(len(widget._strokeStarts) >= 3,
+                         "precondition: stroke marks outlive the states they point at",
+                         "{} marks".format(len(widget._strokeStarts)))
+
+            widget.lesionTable.clearSelection()
+            pump(0.2)
+            CHECKS.check(editor.readOnly,
+                         "precondition: no lesion selected, so the brush is locked and the "
+                         "editor's own Undo button cannot tell whether a step exists")
+
+            segmentation = widget.logic.segmentationNode.GetSegmentation()
+            for eventName in ("SourceRepresentationModified", "RepresentationModified",
+                              "SegmentModified", "SegmentAdded", "SegmentRemoved"):
+                eventId = getattr(slicer.vtkSegmentation, eventName, None)
+                if eventId is not None:
+                    observed.append((segmentation, segmentation.AddObserver(eventId, countEvent)))
+            widget._stepHistory = stepHistory
+            widget.refreshLesions = refreshLesions
+            timer.setInterval(20)
+            timer.connect("timeout()", tick)
+            gap["last"] = time.time()
+            timer.start()
+            started = time.time()
+            for _ in range(clicks):
+                postClick()
+            pump(0.3)
+            burstSeconds = time.time() - started
+            refreshesDuringBurst = stats["refreshes"]
+            pump(1.2)  # past the lesion refresh debounce
+            timer.stop()
+            print("  {} clicks: {} presses handled, {} raw steps, {} found nothing, "
+                  "longest event-loop gap {:.3f} s".format(
+                      clicks, stats["presses"], stats["tries"], stats["failed"], gap["max"]))
+
+            CHECKS.check(stats["presses"] == clicks,
+                         "every click was handled, none dropped",
+                         "{} of {}".format(stats["presses"], clicks))
+            CHECKS.check(stats["maxDepth"] == 1 and stats["pressesInsideRecount"] == 0,
+                         "no press ran nested inside another press or its lesion recount",
+                         "depth {}, {} presses inside a recount".format(
+                             stats["maxDepth"], stats["pressesInsideRecount"]))
+            CHECKS.check(stats["failed"] <= clicks,
+                         "a press stops at the first step that finds nothing to undo",
+                         "{} empty steps for {} presses".format(stats["failed"], clicks))
+            CHECKS.check(stats["tries"] - stats["failed"] <= widget.MIN_UNDO_STATES,
+                         "only the states actually kept were stepped through",
+                         "{} real steps".format(stats["tries"] - stats["failed"]))
+            CHECKS.check(refreshesDuringBurst == 0,
+                         "no lesion recount inside the burst",
+                         "{} recounts".format(refreshesDuringBurst))
+            if widget.autoRefreshCheckBox.checked:
+                CHECKS.check(stats["refreshes"] == 1,
+                             "one debounced recount once the clicks stop",
+                             "{} recounts".format(stats["refreshes"]))
+            CHECKS.check(gap["max"] < 1.0,
+                         "the panel never stopped responding",
+                         "longest gap {:.3f} s, burst handled in {:.3f} s".format(
+                             gap["max"], burstSeconds))
+        finally:
+            timer.stop()
+            for observedObject, tag in observed:
+                observedObject.RemoveObserver(tag)
+            for name in ("_stepHistory", "refreshLesions", "UNDO_MEMORY_BUDGET_MB"):
+                if name in vars(widget):
+                    delattr(widget, name)
+            widget.loadCurrentCase()
+            pump()
+            widget.lesionTable.selectRow(0)
+            pump()
+        CHECKS.check(np.array_equal(widget.logic.exportLabelmapArrayIJK(), loaded),
+                     "reloading the case puts the loaded mask back for the steps below")
 
     def test_06_sphere_threshold_2d(self):
         CHECKS.step("Sphere threshold: a ball, then a disc with 2D ticked")

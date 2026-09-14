@@ -992,6 +992,12 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._editSerial = 0
         self._redoPending = False
         self._editorHistoryButtons = {}
+        # bumped by every vtkSegmentation event: a raw undo or redo that raised
+        # none had nothing to step to (see _stepOnce)
+        self._segmentationEventCount = 0
+        # an Undo / Redo press is being handled; presses re-entering through a
+        # nested event loop are dropped
+        self._historyStepping = False
         self.liveFillCheckBox = None
 
         self.cases = []
@@ -2011,6 +2017,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             shortcut.connect(
                 "activated()", self._shortcutHandler(callback, key, modifiers, text)
             )
+            if keys in ("Ctrl+Z", "Ctrl+Y", "Ctrl+Shift+Z"):
+                # a held key would queue presses faster than a large mask can
+                # step through them, and they would keep undoing after release
+                shortcut.setAutoRepeat(False)
             self._shortcuts.append(shortcut)
 
     def _shortcutHandler(self, callback, key, modifiers, text):
@@ -3170,6 +3180,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         cheap: the case status (which stats every file of the case) is only
         redrawn when the unsaved flag actually flips."""
         del caller, event
+        self._segmentationEventCount += 1
         if self.logic.segmentationNode is None:
             return
         flipped = not self.unsavedChanges
@@ -4318,7 +4329,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     @guarded("Undo")
     def onUndo(self):
-        if self.editor is not None:
+        if self.editor is None or self._historyStepping:
+            return
+        self._historyStepping = True
+        try:
             here = self._maskFingerprint()
             # A mark whose edit changed nothing (a bare click that painted no
             # voxel, a cancelled drag) is already the current state; using it
@@ -4329,25 +4343,44 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 if candidate != here:
                     target = candidate
                     break
-            self._stepHistory(self.editor.undo, target, "UndoButton")
-            self._redoPending = True
-            if target is not None and here is not None:
-                self._redoTargets.append(here)
-            self.setLesionsStale(True)
-            if self.autoRefreshCheckBox.checked:
-                self.refreshLesions()
+            moved = self._stepHistory(self.editor.undo, target, "UndoButton")
+            if moved:
+                self._redoPending = True
+                if target is not None and here is not None:
+                    self._redoTargets.append(here)
+            self._afterHistoryStep(moved)
+        finally:
+            self._historyStepping = False
 
     @guarded("Redo")
     def onRedo(self):
-        if self.editor is not None:
+        if self.editor is None or self._historyStepping:
+            return
+        self._historyStepping = True
+        try:
             target = self._redoTargets.pop() if self._redoTargets else None
             here = self._maskFingerprint()
-            self._stepHistory(self.editor.redo, target, "RedoButton")
-            if target is not None and here is not None:
+            moved = self._stepHistory(self.editor.redo, target, "RedoButton")
+            if moved and target is not None and here is not None:
                 self._strokeStarts.append(here)
-            self.setLesionsStale(True)
-            if self.autoRefreshCheckBox.checked:
-                self.refreshLesions()
+            self._afterHistoryStep(moved)
+        finally:
+            self._historyStepping = False
+
+    def _afterHistoryStep(self, moved):
+        """Recount the lesions once the presses stop, not after every press.
+
+        Recounting straight after each press took most of the press, and its
+        busy cursor pumps events, so presses queued meanwhile ran nested inside
+        it: clicking Undo fast froze the panel.  The restored states have
+        already raised onSegmentationModified, which marks the list stale and
+        restarts the debounce timer; this only makes sure of it.
+        """
+        if not moved:
+            return
+        self.setLesionsStale(True)
+        if self._refreshTimer is not None and self.autoRefreshCheckBox.checked:
+            self._refreshTimer.start(self.LESION_REFRESH_DEBOUNCE_MS)
 
     #: how many history states Slicer keeps at most (one per brush stamp with Live fill)
     MAX_UNDO_STATES = 200
@@ -4430,31 +4463,50 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         continues until the mask matches it again, which undoes the stroke as a
         unit.  Without one, it only steps past states that change nothing.
 
-        *availability* names the editor button ("UndoButton" / "RedoButton")
-        that says whether another step exists.  The walk stops as soon as it
-        does not, and never takes more steps than the history can hold: once
-        the memory budget has dropped the state a stroke began from, its mark
-        cannot be reached and the walk ends at the oldest state kept.
+        The walk ends at the first step that finds nothing to step to (see
+        :meth:`_stepOnce`), and never takes more steps than the history can
+        hold: once the memory budget has dropped the state a stroke began from,
+        its mark cannot be reached and the walk ends at the oldest state kept.
+        Returns whether the history moved at all.
         """
         before = self._maskFingerprint()
         if before is None:
-            step()
-            return
+            return self._stepOnce(step, availability)
+        moved = False
         if target is not None:
             limit = min(self.HISTORY_STROKE_LIMIT, int(self.editor.maximumNumberOfUndoStates))
             for _ in range(max(1, limit)):
-                if availability and self._historyStepAvailable(availability) is False:
-                    return
-                step()
+                if not self._stepOnce(step, availability):
+                    return moved  # the end of the history
+                moved = True
                 if self._maskFingerprint() == target:
-                    return
-            return  # ran out of history: leave it where it got to
+                    return moved
+            return moved  # ran out of steps: leave it where it got to
         for _ in range(self.HISTORY_SKIP_LIMIT):
-            if availability and self._historyStepAvailable(availability) is False:
-                return
-            step()
+            if not self._stepOnce(step, availability):
+                return moved
+            moved = True
             if self._maskFingerprint() != before:
-                return
+                return moved
+        return moved
+
+    def _stepOnce(self, step, availability=None):
+        """One raw undo or redo; False when there was nothing to step to.
+
+        *availability* names the editor button ("UndoButton" / "RedoButton")
+        that answers before trying, but only while the editor is unlocked.
+        Otherwise the step is tried and judged by whether it raised any
+        segmentation event: restoring a state always rewrites the segments,
+        even a state identical to the current one, while an undo at the start
+        of the history or a redo at its end changes nothing and only logs a
+        warning (verified on 5.12.3).  Without this a press at the end of the
+        history walked up to the whole stroke limit, a warning per step.
+        """
+        if availability and self._historyStepAvailable(availability) is False:
+            return False
+        before = self._segmentationEventCount
+        step()
+        return self._segmentationEventCount != before
 
     @guarded("Resetting the case")
     def onReset(self):
