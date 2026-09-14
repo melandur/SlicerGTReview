@@ -481,6 +481,12 @@ class GTReviewIntegrationTest(unittest.TestCase):
         CHECKS.check(len(widget._strokeStarts) == 1,
                      "the mask at mouse-down was fingerprinted, once for the stroke",
                      "{} marks".format(len(widget._strokeStarts)))
+        # The effect aborts the release event it handles, so this only holds
+        # while GTReview's release observer runs ahead of the segment editor.
+        CHECKS.check(not widget._strokeInProgress,
+                     "the mouse release ended the stroke")
+        CHECKS.check(not widget._undoPeaks.editInProgress,
+                     "and closed its edit for the undo memory budget")
 
     def test_03b_live_fill_toggle(self):
         CHECKS.step("Live fill: immediate brush by default, delayed when unticked")
