@@ -77,7 +77,7 @@ for _name in [_n for _n in list(sys.modules)
 del _name, _file
 
 try:
-    from GTReviewLib import dataset, layouts, lesions, maskio
+    from GTReviewLib import dataset, layouts, lesions, maskio, undobudget
 except ImportError as exc:  # pragma: no cover - broken install
     raise ImportError(
         "GTReview could not import GTReviewLib from {} — is the extension "
@@ -984,6 +984,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._redoTargets = []
         self._strokeObservers = []
         self._strokeInProgress = False
+        # undo memory budget: per-edit mask sizes, the fingerprint the edit in
+        # progress started from, and whether an Undo press may have left states
+        # to redo (the editor's own Redo button only tells while it is unlocked)
+        self._undoPeaks = undobudget.EditPeaks(self.MAX_UNDO_STATES)
+        self._editStartFingerprint = None
+        self._editSerial = 0
+        self._redoPending = False
+        self._editorHistoryButtons = {}
         self.liveFillCheckBox = None
 
         self.cases = []
@@ -1551,9 +1559,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.editor = segmentationWidgets.qMRMLSegmentEditorWidget()
         # Painting is immediate (see _applyImmediatePaint), and Slicer saves an
         # undo state per brush stamp rather than per stroke, so one drag can eat
-        # a dozen states.  20 would leave no history after a couple of strokes;
-        # each state is a labelmap copy, so this is not free either.
-        self.editor.setMaximumNumberOfUndoStates(60)
+        # a dozen states.  200 covers a full pass over a small case; each state
+        # is a labelmap copy, so _enforceUndoBudget lowers this for large masks
+        # to keep the history inside UNDO_MEMORY_BUDGET_MB.
+        self.editor.setMaximumNumberOfUndoStates(self.MAX_UNDO_STATES)
         # setUndoEnabled(True) CLEARS the undo history every time it is called
         # (verified on 5.10), so it runs exactly once, here, before any edit.
         # Its read-back getter only reports widget visibility, never rely on it.
@@ -2289,6 +2298,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._clearLesionSelection()
         if case is None:
             self.logic.unloadCase()
+            self._resetUndoBudget()
             self.unsavedChanges = False
             self.componentMap = None
             self.lesionList = []
@@ -2302,10 +2312,13 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # fingerprints of the previous case's strokes mean nothing here
         self._strokeStarts = []
         self._redoTargets = []
+        self._resetUndoBudget()
 
         self._updateMaskSourceComboBox()
         self._populateVolumeComboBoxes()
         self._attachEditor()
+        # the new segmentation node starts an empty history: price it afresh
+        self._enforceUndoBudget()
         self.applyMaskDisplay()
         self._startObservingSegmentation()
         self._chooseDefaultLayout()
@@ -2325,6 +2338,12 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 ),
                 5000,
             )
+
+    def _resetUndoBudget(self):
+        """Forget the previous case's history: a new segmentation clears it."""
+        self._undoPeaks.reset()
+        self._editStartFingerprint = None
+        self._redoPending = False
 
     def _attachEditor(self):
         if self.editor is None:
@@ -2776,8 +2795,16 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 vtk.vtkCommand.LeftButtonPressEvent, self._onStrokeStart, 100.0
             )
             self._strokeObservers.append((interactor, tag))
+            # Ahead of the effects as well: an effect that handles a release or
+            # a drag aborts the event, so an observer queued behind the effects
+            # never hears the button come up (the stroke flag then stuck on and
+            # the deferred lesion refresh kept postponing itself).
             tag = interactor.AddObserver(
-                vtk.vtkCommand.LeftButtonReleaseEvent, self._onStrokeEnd, -100.0
+                vtk.vtkCommand.LeftButtonReleaseEvent, self._onStrokeEnd, 100.0
+            )
+            self._strokeObservers.append((interactor, tag))
+            tag = interactor.AddObserver(
+                vtk.vtkCommand.MouseMoveEvent, self._onStrokeMove, 100.0
             )
             self._strokeObservers.append((interactor, tag))
 
@@ -2794,8 +2821,39 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._markEdit()
 
     def _onStrokeEnd(self, caller=None, event=None):
+        """Mouse-up: the stroke is over, though the effect has not applied it.
+
+        This runs ahead of the effects, and delayed paint and the Sphere
+        threshold only write the mask on release, so the edit is closed from
+        the event loop once they have.  The serial keeps that late close from
+        ending an edit that began in between.
+        """
         del caller, event
+        wasStroke = self._strokeInProgress
         self._strokeInProgress = False
+        if wasStroke:
+            serial = self._editSerial
+            qt.QTimer.singleShot(0, lambda: self._finishEdit(serial))
+
+    def _onStrokeMove(self, caller=None, event=None):
+        """Keep the history in budget while a Live fill stroke grows the mask.
+
+        Without this a long drag that reaches past the labelmap's edge would
+        save a dozen ever-larger states before the button comes up.  It runs
+        ahead of the effects, so it sees the mask as the previous stamp left
+        it; the close on mouse-up measures the last one.
+        """
+        del caller, event
+        if not self._strokeInProgress:
+            return
+        try:
+            nbytes = self._historyStateBytes()
+            if nbytes is None:
+                return
+            self._undoPeaks.observe(nbytes)
+            self._enforceUndoBudget(nbytes)
+        except Exception:  # noqa: BLE001 - never raise out of a VTK observer
+            logging.debug("GTReview: undo budget check during a stroke failed", exc_info=True)
 
     def _markEdit(self):
         """Remember the mask as it stands, so one Undo press steps over the
@@ -2812,6 +2870,136 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._redoTargets = []  # a new edit invalidates the redo trail
         self._strokeStarts.append(fingerprint)
         del self._strokeStarts[: -self.MAX_STROKE_MARKS]
+        self._editStartFingerprint = fingerprint
+        self._editSerial += 1
+        self._undoPeaks.begin(self._historyStateBytes() or 0)
+
+    def _finishEdit(self, serial=None):
+        """Close the edit :meth:`_markEdit` opened and keep undo in budget.
+
+        Called when the mouse button comes up after a stroke and after every
+        panel operation.  An edit that changed the mask has made Slicer drop
+        every state there was to redo, which is what lets a lower cap land.
+        *serial* is given by a close deferred from mouse-up; it is dropped when
+        a newer edit has begun since.
+        """
+        if serial is not None and serial != self._editSerial:
+            return
+        start = self._editStartFingerprint
+        self._editStartFingerprint = None
+        if start is None:
+            return
+        try:
+            nbytes = self._historyStateBytes()
+            if nbytes is None:
+                return
+            self._undoPeaks.end(nbytes)
+            if self._redoPending and self._maskFingerprint() != start:
+                self._redoPending = False
+            self._enforceUndoBudget(nbytes)
+        except Exception:  # noqa: BLE001 - budget upkeep must never break an edit
+            logging.warning("GTReview: keeping the undo history in budget failed", exc_info=True)
+
+    def _historyStateBytes(self):
+        """What one undo state of the mask as it stands costs, in bytes.
+
+        A state copies every representation of every segment that changed
+        since the state before (``vtkSegmentation::CopySegment``), and segments
+        sharing one labelmap share one copy.  Summing each distinct object once
+        prices a state that changed everything, so the estimate errs high.
+        """
+        node = self.logic.segmentationNode if self.logic is not None else None
+        if node is None:
+            return None
+        converter = slicer.vtkSegmentationConverter
+        names = []
+        for getter in self.REPRESENTATION_NAME_GETTERS:
+            method = getattr(converter, getter, None)
+            if method is not None:
+                names.append(method())
+        segmentation = node.GetSegmentation()
+        seen = set()
+        total = 0
+        for segmentId in self.logic.segmentIds():
+            segment = segmentation.GetSegment(segmentId)
+            if segment is None:
+                continue
+            for name in names:
+                representation = segment.GetRepresentation(name)
+                if representation is None:
+                    continue
+                key = getattr(representation, "__this__", None) or id(representation)
+                if key in seen:
+                    continue
+                seen.add(key)
+                total += int(representation.GetActualMemorySize()) * 1024
+        return total
+
+    def _editorHistoryButton(self, name):
+        """The segment editor's own (hidden) UndoButton or RedoButton, or None."""
+        if self.editor is None:
+            return None
+        if name not in self._editorHistoryButtons:
+            try:
+                button = slicer.util.findChild(self.editor, name)
+            except Exception:  # noqa: BLE001 - findChild raises when absent
+                button = None
+            self._editorHistoryButtons[name] = button
+        return self._editorHistoryButtons[name]
+
+    def _historyStepAvailable(self, name):
+        """True / False when the editor can say whether undo or redo is possible.
+
+        The editor enables its buttons from ``CanUndo`` / ``CanRedo`` but only
+        while unlocked, so a read-only editor answers None: unknown.
+        """
+        button = self._editorHistoryButton(name)
+        if button is None:
+            return None
+        try:
+            if self.editor.readOnly:
+                return None
+            return bool(button.enabled)
+        except Exception:  # noqa: BLE001 - widget torn down
+            return None
+
+    def _redoMayExist(self):
+        known = self._historyStepAvailable("RedoButton")
+        if known is not None:
+            if not known:
+                self._redoPending = False
+            return known
+        return self._redoPending
+
+    def _enforceUndoBudget(self, currentBytes=None):
+        """Set Slicer's undo depth so the history fits UNDO_MEMORY_BUDGET_MB.
+
+        Lowering the limit drops the oldest states.  It is never lowered while
+        there are states to redo: ``vtkSegmentationHistory`` decrements its
+        unsigned position once per state dropped, so dropping more states than
+        sit behind that position wraps it and breaks undo.  At the head of the
+        history the position is at least the number dropped, so it is safe
+        there, and the next edit that changes the mask brings the history back
+        to its head.  Raising the limit drops nothing and is always safe.
+        """
+        if self.editor is None:
+            return
+        if currentBytes is None:
+            currentBytes = self._historyStateBytes()
+            if currentBytes is None:
+                return
+        cap = undobudget.states_for_budget(
+            self._undoPeaks.estimate(currentBytes),
+            int(float(self.UNDO_MEMORY_BUDGET_MB) * undobudget.MIB),
+            self.MIN_UNDO_STATES,
+            self.MAX_UNDO_STATES,
+        )
+        current = int(self.editor.maximumNumberOfUndoStates)
+        if cap == current:
+            return
+        if cap < current and self._redoMayExist():
+            return
+        self.editor.setMaximumNumberOfUndoStates(cap)
 
     def applySliceOrientation(self):
         """Point the slice views at the mask's voxel grid, or back at anatomy.
@@ -3738,6 +3926,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._markEdit()
         with BusyCursor("GTReview: deleting lesion {} ...".format(lesion.index)):
             self.logic.deleteLesionVoxels(mask)
+        self._finishEdit()
         # the deleted lesion is gone and the rest get renumbered
         self._clearLesionSelection()
         self.unsavedChanges = True
@@ -3834,6 +4023,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._markEdit()
         with BusyCursor("GTReview: deleting label {} ...".format(label)):
             removed = self.logic.deleteLabelVoxels(label)
+        self._finishEdit()
         self._clearLesionSelection()
         self.unsavedChanges = True
         self.refreshLesions()
@@ -3863,6 +4053,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         with BusyCursor("GTReview: lesion {} -> label {} ...".format(lesion.index, target)):
             self._markEdit()
             self.logic.changeLesionLabel(mask, target)
+        self._finishEdit()
         self.unsavedChanges = True
         self.refreshLesions()
         # the rebuild restores the selection silently; re-sync the brush label
@@ -4138,7 +4329,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 if candidate != here:
                     target = candidate
                     break
-            self._stepHistory(self.editor.undo, target)
+            self._stepHistory(self.editor.undo, target, "UndoButton")
+            self._redoPending = True
             if target is not None and here is not None:
                 self._redoTargets.append(here)
             self.setLesionsStale(True)
@@ -4150,19 +4342,33 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.editor is not None:
             target = self._redoTargets.pop() if self._redoTargets else None
             here = self._maskFingerprint()
-            self._stepHistory(self.editor.redo, target)
+            self._stepHistory(self.editor.redo, target, "RedoButton")
             if target is not None and here is not None:
                 self._strokeStarts.append(here)
             self.setLesionsStale(True)
             if self.autoRefreshCheckBox.checked:
                 self.refreshLesions()
 
+    #: how many history states Slicer keeps at most (one per brush stamp with Live fill)
+    MAX_UNDO_STATES = 200
+    #: memory the undo history may hold, in MiB; past it the oldest states go
+    UNDO_MEMORY_BUDGET_MB = 1024
+    #: undo states kept even when one state is a large share of the budget
+    MIN_UNDO_STATES = 5
+    #: vtkSegmentationConverter getters of every representation a state copies
+    REPRESENTATION_NAME_GETTERS = (
+        "GetSegmentationBinaryLabelmapRepresentationName",
+        "GetSegmentationClosedSurfaceRepresentationName",
+        "GetSegmentationFractionalLabelmapRepresentationName",
+        "GetSegmentationPlanarContourRepresentationName",
+        "GetSegmentationRibbonModelRepresentationName",
+    )
     #: how many identical history states one Undo/Redo press will step over
     HISTORY_SKIP_LIMIT = 4
     #: how far Undo will walk back looking for the start of a stroke
-    HISTORY_STROKE_LIMIT = 60
+    HISTORY_STROKE_LIMIT = MAX_UNDO_STATES
     #: how many stroke starts are remembered
-    MAX_STROKE_MARKS = 60
+    MAX_STROKE_MARKS = MAX_UNDO_STATES
 
     def _maskFingerprint(self):
         """Cheap content signature of the mask, to spot a no-op history step.
@@ -4210,7 +4416,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 signature.append(None)
         return tuple(signature)
 
-    def _stepHistory(self, step, target=None):
+    def _stepHistory(self, step, target=None, availability=None):
         """Walk the history until the mask really moves, or *target* is reached.
 
         Two problems are being papered over here, both from painting without
@@ -4223,18 +4429,29 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         With *target* -- the fingerprint taken at mouse-down -- the walk
         continues until the mask matches it again, which undoes the stroke as a
         unit.  Without one, it only steps past states that change nothing.
+
+        *availability* names the editor button ("UndoButton" / "RedoButton")
+        that says whether another step exists.  The walk stops as soon as it
+        does not, and never takes more steps than the history can hold: once
+        the memory budget has dropped the state a stroke began from, its mark
+        cannot be reached and the walk ends at the oldest state kept.
         """
         before = self._maskFingerprint()
         if before is None:
             step()
             return
         if target is not None:
-            for _ in range(self.HISTORY_STROKE_LIMIT):
+            limit = min(self.HISTORY_STROKE_LIMIT, int(self.editor.maximumNumberOfUndoStates))
+            for _ in range(max(1, limit)):
+                if availability and self._historyStepAvailable(availability) is False:
+                    return
                 step()
                 if self._maskFingerprint() == target:
                     return
             return  # ran out of history: leave it where it got to
         for _ in range(self.HISTORY_SKIP_LIMIT):
+            if availability and self._historyStepAvailable(availability) is False:
+                return
             step()
             if self._maskFingerprint() != before:
                 return

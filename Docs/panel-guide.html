@@ -562,6 +562,10 @@
             <p>Unticked: the drag only draws the brush outlines and the whole stroke is filled once
               when you release. Much smoother; you just do not see the fill until the button comes
               up. Undo treats a stroke as one step either way.</p>
+            <p>Unticked also stretches the undo history: Live fill saves one undo state per brush
+              stamp, delayed paint one per stroke. The history is held to a memory budget, so on a
+              large mask the oldest states are dropped first, and fewer states per stroke means
+              more strokes to step back through.</p>
           </div>
         </div>
 

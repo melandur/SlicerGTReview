@@ -18,6 +18,9 @@ interactors.  On a synthetic case (numpy + SimpleITK, never patient data) it
    Red slice view's interactor,
 4. undoes the WHOLE stroke with a single Undo press and redoes it with a single
    Redo press (a stroke is one gesture, not one undo state per brush stamp),
+   then squeezes the undo memory budget: the history keeps no more states than
+   the budget allows, drops the oldest first, still redoes cleanly, never
+   lowers the cap while redo states exist, and Undo presses run out cleanly,
 5. drags the Sphere threshold effect with "2D: this slice only" off and then
    on, and checks the 2D result never leaves the slice it was drawn on,
 6. deletes a lesion with its row's trash button, confirmation stubbed,
@@ -545,6 +548,124 @@ class GTReviewIntegrationTest(unittest.TestCase):
             np.array_equal(widget.logic.exportLabelmapArrayIJK(), self.beforeStroke),
             "and Undo takes it away again",
         )
+
+    def test_05b_undo_memory_budget(self):
+        CHECKS.step("Undo memory budget: the oldest states go first, never mid-undo")
+        widget = self.widget
+        editor = widget.editor
+        budget = gtreview.undobudget
+        loaded = widget.logic.exportLabelmapArrayIJK()
+        undoButton = slicer.util.findChild(editor, "UndoButton")
+        redoButton = slicer.util.findChild(editor, "RedoButton")
+        red = sliceWidgetNamed("Red")
+
+        def stroke(rowJ):
+            """A Live fill stroke along row j of the paint slice: a dozen states."""
+            startRas = widget.logic.centroidToRAS((PAINT_START_IJK[0], rowJ, PAINT_START_IJK[2]))
+            endRas = widget.logic.centroidToRAS((PAINT_END_IJK[0], rowJ, PAINT_END_IJK[2]))
+            dragBetween(red, startRas, endRas)
+            return widget.logic.exportLabelmapArrayIJK()
+
+        def expectedCap():
+            return budget.states_for_budget(
+                widget._undoPeaks.estimate(widget._historyStateBytes()),
+                int(float(widget.UNDO_MEMORY_BUDGET_MB) * budget.MIB),
+                widget.MIN_UNDO_STATES,
+                widget.MAX_UNDO_STATES,
+            )
+
+        try:
+            CHECKS.check(not editor.readOnly,
+                         "the brush is unlocked, so the editor's history buttons are exact")
+            for rowJ in (PAINT_START_IJK[1], PAINT_START_IJK[1] + 3, PAINT_START_IJK[1] + 6):
+                stroke(rowJ)
+            stateBytes = widget._historyStateBytes()
+            CHECKS.check(stateBytes is not None and stateBytes > 0,
+                         "one undo state is priced from the mask", "{} bytes".format(stateBytes))
+            CHECKS.check(editor.maximumNumberOfUndoStates == widget.MAX_UNDO_STATES,
+                         "a small mask keeps the full undo depth under the default budget",
+                         "cap {}".format(editor.maximumNumberOfUndoStates))
+
+            # a budget worth a dozen states of this mask
+            widget.UNDO_MEMORY_BUDGET_MB = (
+                (widget.MIN_UNDO_STATES + 8) * widget._undoPeaks.estimate(stateBytes)
+                / float(budget.MIB)
+            )
+            afterD = stroke(PAINT_START_IJK[1] + 9)
+            cap = editor.maximumNumberOfUndoStates
+            CHECKS.check(cap == expectedCap(),
+                         "the stroke priced the history and set the cap from the budget",
+                         "cap {}, expected {}".format(cap, expectedCap()))
+            CHECKS.check(widget.MIN_UNDO_STATES < cap < widget.MAX_UNDO_STATES,
+                         "a tight budget lowers the depth", "cap {}".format(cap))
+
+            steps = 0
+            while undoButton.enabled and steps < widget.MAX_UNDO_STATES + 5:
+                editor.undo()
+                steps += 1
+            pump(0.1)
+            CHECKS.check(1 <= steps <= cap,
+                         "the history holds no more states than the cap",
+                         "{} undo steps, cap {}".format(steps, cap))
+            CHECKS.check(not np.array_equal(widget.logic.exportLabelmapArrayIJK(), loaded),
+                         "the oldest states were the ones dropped: the loaded mask is out of reach")
+            redone = 0
+            while redoButton.enabled and redone < widget.MAX_UNDO_STATES + 5:
+                editor.redo()
+                redone += 1
+            pump(0.1)
+            CHECKS.check(np.array_equal(widget.logic.exportLabelmapArrayIJK(), afterD),
+                         "every kept state redoes back to the last stroke: the trim left "
+                         "the history consistent",
+                         "{} redo steps".format(redone))
+
+            widget.onUndo()
+            pump()
+            CHECKS.check(redoButton.enabled, "one Undo press leaves states to redo")
+            capBefore = editor.maximumNumberOfUndoStates
+            CHECKS.check(capBefore > widget.MIN_UNDO_STATES,
+                         "precondition: the cap has room to drop", "cap {}".format(capBefore))
+            widget.UNDO_MEMORY_BUDGET_MB = 1e-6  # far below a single state
+            widget._enforceUndoBudget()
+            CHECKS.check(editor.maximumNumberOfUndoStates == capBefore,
+                         "a lower cap waits while redo states exist (trimming then would "
+                         "underflow Slicer's history position)",
+                         "cap {}".format(editor.maximumNumberOfUndoStates))
+            widget.onRedo()
+            pump()
+            CHECKS.check(np.array_equal(widget.logic.exportLabelmapArrayIJK(), afterD),
+                         "and Redo still restores the stroke afterwards")
+
+            stroke(PAINT_START_IJK[1] + 12)
+            CHECKS.check(editor.maximumNumberOfUndoStates == widget.MIN_UNDO_STATES,
+                         "the next edit clears redo, so the deferred cap lands on the floor",
+                         "cap {}".format(editor.maximumNumberOfUndoStates))
+
+            started = time.time()
+            presses = 0
+            while undoButton.enabled and presses < widget.MIN_UNDO_STATES + 5:
+                widget.onUndo()
+                pump(0.05)
+                presses += 1
+            elapsed = time.time() - started
+            CHECKS.check(not undoButton.enabled,
+                         "Undo presses run out at the oldest kept state",
+                         "{} presses".format(presses))
+            CHECKS.check(elapsed < 15.0,
+                         "without walking past the start of the history on every press",
+                         "{:.1f} s".format(elapsed))
+        finally:
+            if "UNDO_MEMORY_BUDGET_MB" in vars(widget):
+                del widget.UNDO_MEMORY_BUDGET_MB
+            widget.loadCurrentCase()
+            pump()
+            widget.lesionTable.selectRow(0)
+            pump()
+        CHECKS.check(np.array_equal(widget.logic.exportLabelmapArrayIJK(), loaded),
+                     "reloading the case puts the loaded mask back for the steps below")
+        CHECKS.check(editor.maximumNumberOfUndoStates == widget.MAX_UNDO_STATES,
+                     "and a fresh case starts from the full depth again",
+                     "cap {}".format(editor.maximumNumberOfUndoStates))
 
     def test_06_sphere_threshold_2d(self):
         CHECKS.step("Sphere threshold: a ball, then a disc with 2D ticked")

@@ -20,6 +20,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/lesions.py
   ${MODULE_NAME}Lib/maskio.py
   ${MODULE_NAME}Lib/SegmentEditorSphereThresholdEffect.py
+  ${MODULE_NAME}Lib/undobudget.py
   )
 
 # Resources/ is shared across all scripted modules in the built tree, so the
