@@ -85,6 +85,8 @@ GTReview.s4ext
 # will not descend into an ignored directory to honour an exception.
 !Packages/*.tar.gz
 *.zip
+# ...and the Windows extension packages, which are .zip like Slicer's own.
+!Packages/*.zip
 
 # --- Editors / OS -----------------------------------------------------------
 .idea/
