@@ -23,9 +23,11 @@ install the package, open the module, and what each box of the panel is for.
 Start there.
 
 `Docs/panel-guide.html` walks through every control in the panel, section by
-section, in the order you meet them. Open it in a browser and keep it beside
-Slicer; it is a single self-contained file, so it works from a file:// path or
-from a share.
+section, in the order you meet them, with a screenshot of each section. Open it
+in a browser and keep it beside Slicer; it is a single self-contained file (the
+screenshots are embedded), so it works from a file:// path or from a share.
+After retaking the screenshots in `Docs/img`, `python Docs/embed_screenshots.py`
+puts the new ones into it.
 
 ## Features
 
