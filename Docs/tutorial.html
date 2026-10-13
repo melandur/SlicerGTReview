@@ -9,14 +9,17 @@
     --ground: #f6f8fa; --surface: #ffffff; --ink: #151a22; --ink-soft: #454f5e;
     --ink-mute: #6b7686; --rule: #dde2ea; --accent: #2f7fd0;
     --dataset: #2f7fd0; --display: #2f9f6f; --lesions: #d98b2b; --editing: #8a5bd6;
+    --recording: #c43c3c;
   }
   /* Day is the default. Night follows the system unless the switch says otherwise. */
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) { --ground: #12161c; --surface: #1a2029; --ink: #e8ecf1; --ink-soft: #b8c0cc;
-            --ink-mute: #8a94a3; --rule: #2b3340; --accent: #6fa8e6; --display: #4fbf8c; --lesions: #e6a24a; --editing: #b08ce8; }
+            --ink-mute: #8a94a3; --rule: #2b3340; --accent: #6fa8e6; --display: #4fbf8c; --lesions: #e6a24a; --editing: #b08ce8;
+            --recording: #ec7a7a; }
   }
   :root[data-theme="dark"] { --ground: #12161c; --surface: #1a2029; --ink: #e8ecf1; --ink-soft: #b8c0cc;
-            --ink-mute: #8a94a3; --rule: #2b3340; --accent: #6fa8e6; --display: #4fbf8c; --lesions: #e6a24a; --editing: #b08ce8; }
+            --ink-mute: #8a94a3; --rule: #2b3340; --accent: #6fa8e6; --display: #4fbf8c; --lesions: #e6a24a; --editing: #b08ce8;
+            --recording: #ec7a7a; }
   .theme-switch { position: fixed; top: 14px; right: 14px; display: inline-flex; gap: 2px; padding: 3px;
                   background: var(--surface); border: 1px solid var(--rule); border-radius: 999px; z-index: 5; }
   .theme-switch button { font: inherit; font-size: 0.85rem; padding: 4px 12px; border: 0; border-radius: 999px;
@@ -39,6 +42,7 @@
   h3 { font-size: 1.1rem; margin: 22px 0 8px; }
   h3.dataset { color: var(--dataset); } h3.display { color: var(--display); }
   h3.lesions { color: var(--lesions); } h3.editing { color: var(--editing); }
+  h3.recording { color: var(--recording); }
   p, li { color: var(--ink); }
   ul { padding-left: 22px; margin: 6px 0 12px; }
   li { margin: 4px 0; }
@@ -72,7 +76,7 @@
 </div>
 <main>
   <h1>GTReview: install and first review</h1>
-  <p class="lede">From a fresh 3D Slicer to a saved review in four steps. Only what you need per box;
+  <p class="lede">From a fresh 3D Slicer to a saved review in four steps, and an optional fifth to record it. Only what you need per box;
     the full control-by-control reference is in the <a href="panel-guide.html">panel guide</a>.</p>
 
   <nav class="toc">
@@ -80,6 +84,7 @@
     <a href="#plugin">2 · Install the plugin</a>
     <a href="#open">3 · Open it</a>
     <a href="#use">4 · Review a case</a>
+    <a href="#record">5 · Record it (optional)</a>
     <a href="#keys">Keys</a>
     <a href="#problems">If something goes wrong</a>
   </nav>
@@ -159,7 +164,8 @@
 
   <section id="use">
     <h2><span class="step">4</span>Review a case</h2>
-    <p>The panel has four boxes, top to bottom, in the order you use them. With several sequences per case
+    <p>The panel's first four boxes take you through a review, top to bottom, in the order you use them;
+      the fifth, <i>Recording</i>, is <a href="#record">step 5</a>. With several sequences per case
       the views open side by side, one axial view per sequence, and scrolling one scrolls them all.</p>
     <figure>
       <img src="img/overview-sequences.png" alt="Slicer with the GTReview panel on the left and four linked axial views showing t1, t1c, t2 and flair">
@@ -229,6 +235,53 @@
     </figure>
   </section>
 
+  <section id="record">
+    <h2><span class="step">5</span>Record a review (optional)</h2>
+    <p>Talk through a case, keep the views on video, or both, so whoever listens or re-annotates later knows
+      which lesion you were on at every moment. The review works exactly as without: leave the buttons off and
+      nothing is recorded.</p>
+
+    <div class="grid">
+      <div>
+        <h3 class="recording">Recording · what you say and see</h3>
+        <ul>
+          <li><b>Record microphone</b> / <b>Record video</b>: two switches, use either or both. While one is on, a
+            red <b>● REC</b> shows in Slicer's status bar and the time runs next to the buttons. Press again to stop.</li>
+          <li><b>Microphone</b>: pick your input; <i>System default</i> follows the system. Press <b>Test</b> and
+            speak: the bar underneath must move. Plugged one in? Press the refresh button.</li>
+          <li><b>Video</b>: <i>All views</i>, every sequence as laid out, or a single slice view.</li>
+          <li>Recordings are kept <b>per case</b> in <code>GTReview-recordings/&lt;case&gt;</code> inside the batch
+            folder; <b>Next &gt;</b> or <b>Save &amp; next case</b> starts the next case's files by itself.
+            <b>Open folder</b> shows them.</li>
+        </ul>
+      </div>
+      <figure><img src="img/panel-recording.png" alt="The Recording box while both the microphone and the video record"></figure>
+    </div>
+
+    <figure>
+      <img src="img/recording-frame.png" alt="A frame of the recorded video: four axial views under a banner naming the case and the selected lesion">
+      <figcaption>A frame of the video. The banner names the case and the lesion you are on: its number, label, size and a voxel inside it.</figcaption>
+    </figure>
+
+    <h3>What you get, per case</h3>
+    <ul>
+      <li><code>&lt;case&gt;_&lt;date-time&gt;.wav</code>: your voice, with a short chime and a spoken
+        <i>“lesion three”</i> wherever you moved to another lesion; paging quickly through the list announces only
+        the lesion you stop on. <code>…_mic.wav</code> is your voice untouched.</li>
+      <li><code>….mp4</code>: the video, carrying that audio and one chapter per lesion. Without ffmpeg it is an
+        <code>.ogv</code> at 5 frames a second; <b>Get ffmpeg…</b> downloads ffmpeg into Slicer once (about 30&nbsp;MB).</li>
+      <li><code>….srt</code>: the lesion as subtitles; VLC and mpv show them by themselves.</li>
+      <li><code>….json</code>: every switch with the lesion's voxel. Lesion numbers change when lesions are deleted
+        or grow; the voxel finds the same lesion again, in the original mask and in your review.</li>
+    </ul>
+    <div class="note">
+      <b>macOS</b>: Slicer as downloaded may not use the microphone, so the recording comes out silent; GTReview
+      warns after a few seconds. The video works. <b>Windows</b>: let desktop apps use the microphone under
+      <i>Settings → Privacy → Microphone</i>. A voice recording is personal data and the video shows the scans:
+      agree on recording with whoever is recorded, and keep recordings wherever the batch itself may be kept.
+    </div>
+  </section>
+
   <section id="keys">
     <h2>Keys</h2>
     <table class="keys">
@@ -261,6 +314,8 @@
         in memory, and is lost if Slicer crashes first.</li>
       <li>Each session starts with a header naming the GTReview build, the Slicer version and where Slicer's own
         log file is.</li>
+      <li>Recording problems (a microphone that records only silence, one unplugged mid-recording, a folder that
+        cannot be written) are shown in a warning and written to the log as well.</li>
       <li>The log moves only when a session starts: once it has passed 5&nbsp;MB, it becomes
         <code>GTReview.log.1</code> and a fresh one begins. Within a session, past 5&nbsp;MB, Slicer's warnings stop
         being copied (Slicer's own log still has them); GTReview's own lines keep coming.</li>
