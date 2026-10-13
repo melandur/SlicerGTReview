@@ -682,11 +682,15 @@ _VOICE_CACHE = {}
 _VOICE_LOCK = threading.Lock()
 
 
-def _voice(rate):
+def _voice(rate, names):
+    """The clips *names* at *rate* that the voice has, each loaded once: a
+    recording speaks a few of the 532, and all of them at a microphone's rate
+    would hold some 50 MB."""
     with _VOICE_LOCK:
-        if rate not in _VOICE_CACHE:
-            _VOICE_CACHE[rate] = wavfile.load_voice(VOICE_DIR, rate, recordlog.VOICE_CLIPS)
-        return _VOICE_CACHE[rate]
+        missing = [name for name in names if (rate, name) not in _VOICE_CACHE]
+        for name, clip in wavfile.load_voice(VOICE_DIR, rate, missing).items():
+            _VOICE_CACHE[(rate, name)] = clip
+        return {name: _VOICE_CACHE[(rate, name)] for name in names if (rate, name) in _VOICE_CACHE}
 
 
 def finishTake(take):
@@ -743,10 +747,13 @@ def _narrateInto(take, events, source, target, audio):
     """*source* with the announcements mixed in, as *target*."""
     rate, mic = wavfile.read_wav(source)
     audio.update(rate=rate, channels=int(mic.shape[1]))
-    clips = _voice(rate)
     placements = []
     for at, names, _text in recordlog.announcement_schedule(events, float(audio["offset"])):
-        clip = wavfile.phrase(names, clips, rate)
+        clip = wavfile.phrase(names, _voice(rate, names), rate)
+        if clip is None:
+            # a voice without this phrase (one recorded by hand) says it word by word
+            words = recordlog.words_for(names)
+            clip = wavfile.phrase(words, _voice(rate, words), rate)
         if clip is not None:
             placements.append((at, clip))
     wavfile.write_wav(target, rate, wavfile.narrate(mic, rate, placements))

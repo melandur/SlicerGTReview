@@ -69,13 +69,23 @@ class NumberWordsTest(unittest.TestCase):
                 self.assertLessEqual(set(recordlog.announcement_words(kind, number)),
                                      set(recordlog.VOICE_WORDS))
 
-    def test_up_to_ninety_nine_is_one_phrase(self):
+    def test_up_to_five_hundred_is_one_phrase(self):
         self.assertEqual(recordlog.announcement_clips(LESION_SELECTED, 7), ["lesion-7"])
         self.assertEqual(recordlog.announcement_clips(LESION_ADOPTED, 99), ["new", "lesion-99"])
         self.assertEqual(recordlog.announcement_clips(LESION_RENUMBERED, 2), ["now", "lesion-2"])
+        self.assertEqual(recordlog.announcement_clips(LESION_SELECTED, 105), ["lesion-105"])
+        self.assertEqual(recordlog.announcement_clips(LESION_ADOPTED, 500), ["new", "lesion-500"])
         self.assertEqual(recordlog.announcement_clips(LESION_SELECTED, 0), ["lesion", "zero"])
-        self.assertEqual(recordlog.announcement_clips(LESION_SELECTED, 105),
-                         ["lesion", "one", "hundred", "five"])
+        self.assertEqual(recordlog.announcement_clips(LESION_SELECTED, 501),
+                         ["lesion", "five", "hundred", "one"])
+
+    def test_a_phrase_can_be_spelled_out(self):
+        self.assertEqual(recordlog.words_for(["new", "lesion-123"]),
+                         ["new", "lesion", "one", "hundred", "twenty", "three"])
+        self.assertEqual(recordlog.words_for(["lesion", "five"]), ["lesion", "five"])
+        for number in recordlog.PHRASE_NUMBERS:
+            self.assertLessEqual(set(recordlog.words_for([recordlog.phrase_clip(number)])),
+                                 set(recordlog.VOICE_WORDS))
 
     def test_announcements_name_the_kind_of_change(self):
         self.assertEqual(recordlog.announcement_words(LESION_SELECTED, 3), ["lesion", "three"])

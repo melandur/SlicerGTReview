@@ -358,9 +358,11 @@ def narrate(mic: np.ndarray, rate: int, placements: Sequence[Tuple[float, np.nda
 
     *placements* are ``(seconds, clip)``.  An announcement starts no earlier
     than the end of the one before, so a quick succession never overlaps; one
-    that would start past the end of the recording is dropped.  The reader's
-    voice is scaled by *duck* under an announcement, with *fade* second ramps,
-    so both stay audible.
+    held back until the next is due is left out, so long phrases ("lesion
+    three hundred seventy-seven") never leave the voice running behind the
+    reader; one that would start past the end of the recording is dropped.
+    The reader's voice is scaled by *duck* under an announcement, with *fade*
+    second ramps, so both stay audible.
     """
     mic = np.asarray(mic)
     if mic.ndim == 1:
@@ -371,10 +373,13 @@ def narrate(mic: np.ndarray, rate: int, placements: Sequence[Tuple[float, np.nda
     frames = out.shape[0]
     ramp = max(1, int(fade * rate))
     free_from = 0
-    for seconds, clip in sorted(placements, key=lambda p: p[0]):
+    placements = sorted(placements, key=lambda p: p[0])
+    for index, (seconds, clip) in enumerate(placements):
         start = max(int(round(float(seconds) * rate)), free_from)
         if start >= frames or clip is None or clip.size == 0:
             continue
+        if index + 1 < len(placements) and start >= int(round(float(placements[index + 1][0]) * rate)):
+            continue  # the reader has moved on: the next one is due already
         stop = min(frames, start + clip.size)
         lo, hi = max(0, start - ramp), min(frames, stop + ramp)
         envelope = np.ones(hi - lo, dtype=np.float32)

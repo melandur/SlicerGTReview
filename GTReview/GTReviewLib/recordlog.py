@@ -63,10 +63,11 @@ _TENS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eigh
 #: single words: the "new" / "now" in front of a phrase, and the parts of
 #: numbers too large for a phrase of their own
 VOICE_WORDS = ("lesion", "new", "now") + _ONES + tuple(t for t in _TENS if t) + ("hundred",)
-#: "lesion 1" to "lesion 99" are spoken in one breath, from one clip each:
+#: "lesion 1" to "lesion 500" are spoken in one breath, from one clip each:
 #: words strung together one by one were misheard far more often (a speech
-#: recogniser got 4 of 7 numbers right from word clips, every one from phrases)
-PHRASE_NUMBERS = range(1, 100)
+#: recogniser got 4 of 7 numbers right from word clips, every one from
+#: phrases), and a case of metastases can count hundreds of lesions
+PHRASE_NUMBERS = range(1, 501)
 
 
 def phrase_clip(number: int) -> str:
@@ -119,6 +120,17 @@ def announcement_clips(kind: str, number: int) -> List[str]:
     if number in PHRASE_NUMBERS:
         return _lead(kind) + [phrase_clip(number)]
     return _lead(kind) + ["lesion"] + number_words(number)
+
+
+def words_for(names: Sequence[str]) -> List[str]:
+    """*names* with every whole-phrase clip spelled out in word clips
+    (``lesion-12`` -> ``lesion``, ``twelve``): what a voice that lacks the
+    phrase -- one recorded by hand, say -- speaks instead."""
+    out: List[str] = []
+    for name in names:
+        match = re.match(r"^lesion-(\d+)$", name)
+        out += (["lesion"] + number_words(int(match.group(1)))) if match else [name]
+    return out
 
 
 # --------------------------------------------------------------------------- #

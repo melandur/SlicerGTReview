@@ -262,6 +262,18 @@ class AnnouncementTest(unittest.TestCase):
         self.assertEqual(loud[0], rate)
         self.assertGreaterEqual(loud[-1], rate + rate // 2 + int(0.15 * rate))
 
+    def test_a_held_back_announcement_gives_way_to_the_next(self):
+        rate = self.RATE
+        mic = np.zeros(rate * 10, dtype=np.int16)
+        long_phrase = np.full(int(1.5 * rate), 0.5, dtype=np.float32)
+        # a lesion a second, every announcement a second and a half long
+        out = wavfile.narrate(mic, rate, [(t, long_phrase) for t in (1.0, 2.0, 3.0, 4.0)])
+        loud = out[:, 0] != 0
+        starts = (np.flatnonzero(loud[1:] & ~loud[:-1]) + 1) / float(rate)
+        # 1 s on time, 2 s after the first, 3 s left out (it could start only
+        # after 4 s was due), 4 s after the second: the voice never runs behind
+        np.testing.assert_allclose(starts, [1.0, 2.65, 4.3], atol=1.0 / rate)
+
     def test_loud_input_is_clipped_not_wrapped(self):
         mic = np.full(1000, 32000, dtype=np.int16)
         out = wavfile.narrate(mic, 1000, [(0.1, np.ones(300, dtype=np.float32))], duck=1.0)
@@ -283,7 +295,8 @@ class ShippedVoiceTest(unittest.TestCase):
         missing = sorted(set(recordlog.VOICE_CLIPS) - set(clips))
         self.assertEqual(missing, [])
         for name, clip in clips.items():
-            self.assertLess(clip.size, 16000 * 2.0, name)
+            # "lesion three hundred seventy-seven" is the longest kind
+            self.assertLess(clip.size, 16000 * 3.0, name)
             self.assertGreater(float(np.abs(clip).max()), 0.3, name)
 
     def test_nothing_else_is_there(self):
@@ -298,9 +311,16 @@ class ShippedVoiceTest(unittest.TestCase):
 
     def test_an_announcement_can_be_built_for_any_number(self):
         clips = wavfile.load_voice(VOICE_DIR, 16000, recordlog.VOICE_CLIPS)
-        for number in (1, 42, 99, 100, 4321):
+        for number in (1, 42, 99, 100, 377, 500, 501, 4321):
             names = recordlog.announcement_clips(recordlog.LESION_SELECTED, number)
             self.assertIsNotNone(wavfile.phrase(names, clips, 16000), number)
+
+    def test_a_voice_without_the_phrase_speaks_the_words(self):
+        # a voice recorded by hand may have the single words only
+        words = wavfile.load_voice(VOICE_DIR, 16000, recordlog.VOICE_WORDS)
+        names = recordlog.announcement_clips(recordlog.LESION_ADOPTED, 123)
+        self.assertIsNone(wavfile.phrase(names, words, 16000))
+        self.assertIsNotNone(wavfile.phrase(recordlog.words_for(names), words, 16000))
 
 
 if __name__ == "__main__":

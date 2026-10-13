@@ -572,11 +572,12 @@ event log is written whatever else fails.
 
 The announcements are strung together from the clips in
 `GTReview/Resources/GTReviewVoice/`: the whole phrase for "lesion 1" to
-"lesion 99", and single words for the rest. They were synthesised with Piper
-TTS and its LJSpeech voice, trained on public-domain recordings, and checked
-with a speech recogniser: `Packaging/make_voice_clips.py` makes them again.
-To use a human voice, record WAVs under the same names; a phrase that is
-missing is spoken word by word.
+"lesion 500", each spoken in one breath, and single words for "new", "now"
+and the numbers above 500. They were synthesised with Piper TTS and its
+LJSpeech voice, trained on public-domain recordings, and every phrase was
+checked with a speech recogniser: `Packaging/make_voice_clips.py` makes them
+again. To use a human voice, record WAVs under the same names; a phrase that
+is missing is spoken word by word, so the single words alone are enough.
 
 ### Privacy
 

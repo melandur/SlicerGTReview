@@ -5,15 +5,15 @@ GTReview's narrated recordings announce every switch to another lesion
 ("lesion seven", "new lesion seven", "now lesion two").  The announcement is
 built at run time from the clips in ``GTReview/Resources/GTReviewVoice``:
 
-* ``lesion-1.wav`` ... ``lesion-99.wav``: the whole phrase, spoken in one
+* ``lesion-1.wav`` ... ``lesion-500.wav``: the whole phrase, spoken in one
   breath.  Strung together word by word, numbers were misheard far more often.
 * ``<word>.wav`` for every word in ``GTReviewLib.recordlog.VOICE_WORDS``: the
-  "new" / "now" in front of a phrase, and the words of numbers from 100 up.
+  "new" / "now" in front of a phrase, and the words of numbers above 500.
 
 The clips that ship were synthesised with Piper TTS and its LJSpeech voice
 (``en_US-ljspeech-high``), trained on public-domain recordings.  Piper itself
 is GPL; only its output is kept, never the program or the model.  They are
-8-bit mu-law at 11025 Hz, about a megabyte in all.
+8-bit mu-law at 11025 Hz.
 
 Run this with a Python that has ``piper-tts`` installed -- not inside Slicer:
 
@@ -25,7 +25,8 @@ Run this with a Python that has ``piper-tts`` installed -- not inside Slicer:
 Piper's synthesis is random, and now and then a take comes out mumbled.
 ``--verify`` (needs ``faster-whisper``) has a speech recogniser listen to every
 phrase as GTReview will play it and synthesises again any whose number it
-does not hear.
+does not hear.  ``--missing`` makes only the clips the folder lacks, so the
+ones there -- heard and kept -- stay as they are.
 
 To use a human voice instead, record WAVs under the same names (mono, 16-bit
 PCM or 8-bit mu-law, any sample rate).  A phrase clip that is missing is
@@ -71,6 +72,8 @@ def numbers_heard(text):
             have = True
         elif word == "hundred" and have:
             total *= 100
+        elif word == "and" and have:
+            continue  # "three hundred and five"
         elif have:
             found.append(total)
             total, have = 0, False
@@ -94,6 +97,8 @@ def main():
     parser.add_argument("--out", default=os.path.join(REPO, "GTReview", "Resources", "GTReviewVoice"))
     parser.add_argument("--verify", metavar="WHISPER_MODEL",
                         help="re-synthesise phrases a faster-whisper model mishears, e.g. small.en")
+    parser.add_argument("--missing", action="store_true",
+                        help="make only the clips --out does not have yet")
     args = parser.parse_args()
 
     from piper import PiperVoice, SynthesisConfig
@@ -124,8 +129,11 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     texts = [(word, word + ".", None) for word in recordlog.VOICE_WORDS]
     texts += [(recordlog.phrase_clip(n), "Lesion {}.".format(n), n) for n in recordlog.PHRASE_NUMBERS]
-    total, unverified = 0, []
+    made, total, unverified = 0, 0, []
     for name, text, number in texts:
+        path = os.path.join(args.out, "{}.wav".format(name))
+        if args.missing and os.path.exists(path):
+            continue
         samples = synthesise(text)
         note = ""
         if listener is not None and number is not None:
@@ -138,11 +146,11 @@ def main():
             else:
                 unverified.append(name)
                 note = "NOT HEARD after {} takes".format(ATTEMPTS)
-        path = os.path.join(args.out, "{}.wav".format(name))
         wavfile.write_wav(path, RATE, samples, mulaw=True)
+        made += 1
         total += os.path.getsize(path)
         print("{:10s} {:.2f} s  {!r}  {}".format(name, samples.size / float(RATE), text, note))
-    print("{} clips, {:.0f} KB".format(len(texts), total / 1024.0))
+    print("{} clips made, {:.0f} KB".format(made, total / 1024.0))
     if unverified:
         print("never heard right: " + ", ".join(unverified))
         sys.exit(1)
