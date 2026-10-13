@@ -2010,6 +2010,21 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.microphoneLevelBar.toolTip = "Microphone level while it is open."
         form.addRow("", self.microphoneLevelBar)
 
+        if recording.macMicrophoneProblem():
+            # macOS gives the official Slicer silence: say so up front, and how
+            # to change that, rather than record silence and warn about it
+            note = qt.QLabel("On this Mac Slicer may not use the microphone yet, so the video "
+                             "records without sound.")
+            note.wordWrap = True
+            enable = qt.QPushButton("Enable the microphone...")
+            enable.toolTip = "How to let this Slicer use the microphone (once per Slicer installed)."
+            enable.connect("clicked()", self.onMacMicrophoneHelp)
+            macRow = qt.QHBoxLayout()
+            macRow.setSpacing(6)
+            macRow.addWidget(note, 1)
+            macRow.addWidget(enable)
+            form.addRow(macRow)
+
         self.videoSourceComboBox = qt.QComboBox()
         self.videoSourceComboBox.toolTip = (
             "What the video shows: every view as laid out, or one slice view "
@@ -5601,6 +5616,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.recorder.stopAudio()
             logging.info("GTReview: microphone recording stopped")
             return
+        if recording.macMicrophoneProblem():
+            self._updateRecordingControls()
+            self._macMicrophoneHelp()
+            return
         name, realm, label = self._selectedMicrophone()
         try:
             started = self.recorder.startAudio(name, realm, label)
@@ -5612,10 +5631,6 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         logging.info("GTReview: recording the microphone %s at %d Hz",
                      self.recorder.mic.label, self.recorder.mic.rate)
-        if IS_MAC:
-            self._setRecordingStatus(
-                "macOS lets Slicer use the microphone only if Slicer itself may; "
-                "GTReview warns if what it gets is pure silence.")
 
     @guarded("Recording the video")
     def onRecordVideoToggled(self, checked):
@@ -5632,7 +5647,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         source = str(self.videoSourceComboBox.itemData(self.videoSourceComboBox.currentIndex) or "")
         name, realm, label = self._selectedMicrophone()
         try:
-            started = self.recorder.startVideo(source, name, realm, label)
+            started = self.recorder.startVideo(source, name, realm, label,
+                                               withSound=not recording.macMicrophoneProblem())
         except Exception as error:  # noqa: BLE001
             self._updateRecordingControls()
             raise RuntimeError("The video could not be started: {}".format(error))
@@ -5649,6 +5665,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if not checked:
             self.recorder.stopTest()
+            return
+        if recording.macMicrophoneProblem():
+            self._updateRecordingControls()
+            self._macMicrophoneHelp()
             return
         name, realm, label = self._selectedMicrophone()
         try:
@@ -5712,6 +5732,39 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "GTReview: recording stopped; {} keeps the recording it had.".format(caseId), 6000)
         logging.info("GTReview: %s already has %s: %s", caseId, what, "replaced" if replace else "kept")
         return replace
+
+    @guarded("Showing how to enable the microphone")
+    def onMacMicrophoneHelp(self):
+        self._macMicrophoneHelp()
+
+    def _macMicrophoneHelp(self):
+        """Why this Slicer gets no microphone on macOS, and the command that
+        changes that (GTReviewMacMicrophone.sh), ready to copy."""
+        command = recording.macEnableMicrophoneCommand()
+        box = qt.QMessageBox(slicer.util.mainWindow())
+        box.setWindowTitle("GTReview: the microphone on this Mac")
+        box.setIcon(qt.QMessageBox.Information)
+        box.setTextFormat(qt.Qt.RichText)
+        box.setText("macOS does not let this Slicer use the microphone: {}.".format(
+            recording.macMicrophoneProblem() or "unknown"))
+        box.setInformativeText(
+            "It hands Slicer silence instead, so GTReview cannot record the microphone, and the "
+            "video records without sound.<br><br>"
+            "To change that for this Slicer, quit Slicer, run this in Terminal, then start Slicer "
+            "again; macOS asks once whether Slicer may use the microphone:<br><br>"
+            "<code>{}</code><br><br>"
+            "The script adds the microphone permission to this copy of Slicer and signs it again "
+            "on this Mac. Run it again after installing a new Slicer; installing Slicer again "
+            "undoes it.".format(command.replace("&", "&amp;").replace("<", "&lt;")))
+        box.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        copy = box.addButton("Copy command", qt.QMessageBox.ActionRole)
+        box.addButton(qt.QMessageBox.Close)
+        box.setDefaultButton(copy)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is not None and box.buttonRole(clicked) == qt.QMessageBox.ActionRole:
+            qt.QApplication.clipboard().setText(command)
+            slicer.util.showStatusMessage("GTReview: command copied; quit Slicer and paste it into Terminal.", 8000)
 
     @guarded("Opening the recordings folder")
     def onOpenRecordingsFolder(self):

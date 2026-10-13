@@ -199,7 +199,7 @@ done < <(cd "$MODULE_DIR" && find . -name '*.py' -not -path './__pycache__/*' \
             -not -path '*/__pycache__/*' | sed 's|^\./||' | sort)
 [ "$missing" -eq 0 ] || exit 1
 
-RESOURCES=(Resources/Icons/"$EXTENSION_NAME".png)
+RESOURCES=(Resources/Icons/"$EXTENSION_NAME".png Resources/"$EXTENSION_NAME"MacMicrophone.sh)
 # The spoken clips of narrated recordings: the whole folder, as the module
 # CMakeLists globs it (Testing/test_wavfile.py pins its content).
 mapfile -t VOICE < <(cd "$MODULE_DIR" && find "Resources/${EXTENSION_NAME}Voice" -name '*.wav' | sort)

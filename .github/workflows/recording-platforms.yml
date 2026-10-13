@@ -96,10 +96,125 @@ jobs:
           cat "$GTREVIEW_TEST_LOG" || true
           grep -q "^RESULT: PASS" "$GTREVIEW_TEST_LOG"
 
-      - name: Keep the test log
+      # ---------------------------------------------------------------- Windows
+      # What the microphone really hands Slicer: VB-CABLE, a virtual audio
+      # cable, carries a 440 Hz tone from its playback side to its recording side.
+      - name: A virtual microphone (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: LABSN/sound-ci-helpers@v1
+
+      - name: What Slicer hears from it (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          PROBE_REPORT: ${{ runner.temp }}\probe-windows.json
+          PROBE_DEVICE: cable
+        run: |
+          Set-Service -Name Audiosrv -StartupType Automatic -ErrorAction SilentlyContinue
+          Start-Service Audiosrv -ErrorAction SilentlyContinue
+          Get-Service Audiosrv, AudioEndpointBuilder | Format-Table Name, Status
+          Get-CimInstance Win32_SoundDevice | Format-Table Name, Status
+          python -c "import math, struct, wave; w = wave.open(r'$env:RUNNER_TEMP\tone.wav', 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000); w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(2 * math.pi * 440 * i / 48000))) for i in range(48000 * 20))); w.close()"
+          $player = New-Object System.Media.SoundPlayer "$env:RUNNER_TEMP\tone.wav"
+          $player.PlayLooping()
+          Start-Process -Wait -FilePath $env:SLICER -ArgumentList '--no-splash', '--disable-settings', '--ignore-slicerrc', '--no-main-window', '--additional-module-path', "$env:GITHUB_WORKSPACE\GTReview", '--python-script', "$env:GITHUB_WORKSPACE\.github\scripts\microphone_probe.py"
+          $player.Stop()
+          Get-Content $env:PROBE_REPORT
+
+      # ------------------------------------------------------------------ macOS
+      # What the microphone really hands Slicer: BlackHole, a virtual audio
+      # device, carries a 440 Hz tone from its output to its input.
+      - name: A virtual microphone playing a tone (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          brew install blackhole-2ch switchaudio-osx
+          sudo killall coreaudiod || true
+          sleep 8
+          SwitchAudioSource -a -t input || true
+          SwitchAudioSource -t output -s "BlackHole 2ch"
+          python3 -c "
+          import math, struct, wave
+          rate = 48000
+          with wave.open('$RUNNER_TEMP/tone.wav', 'wb') as w:
+              w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+              w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(rate * 180)))
+          "
+          system_profiler SPAudioDataType | grep -E "^ {8}[A-Z].*:$|Input|Output" || true
+
+      - name: What the official Slicer hears (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          PROBE_REPORT: ${{ runner.temp }}/probe-official.json
+        run: |
+          afplay "$RUNNER_TEMP/tone.wav" &
+          tone=$!
+          sleep 1
+          "$SLICER" --no-splash --disable-settings --ignore-slicerrc --no-main-window \
+            --additional-module-path "$GITHUB_WORKSPACE/GTReview" \
+            --python-script "$GITHUB_WORKSPACE/.github/scripts/microphone_probe.py" || true
+          kill $tone 2> /dev/null || true
+          cat "$PROBE_REPORT"
+
+      - name: Let this Slicer use the microphone, with the script GTReview ships (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          bash GTReview/Resources/GTReviewMacMicrophone.sh "$RUNNER_TEMP/Slicer.app"
+          for code in "$RUNNER_TEMP/Slicer.app" "$RUNNER_TEMP/Slicer.app/Contents/bin/SlicerApp-real"; do
+            echo "== $code"; codesign -dv "$code" 2>&1 | grep -E "flags|Signature"
+            codesign -d --entitlements :- "$code" 2>/dev/null | plutil -p - || true
+          done
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$RUNNER_TEMP/Slicer.app/Contents/Info.plist"
+          codesign --verify --verbose=2 "$RUNNER_TEMP/Slicer.app" || echo "(the app's seal does not verify)"
+
+      - name: Allow the microphone, as a click on "Allow" would (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          python3 .github/scripts/mac_tcc_grant.py "$RUNNER_TEMP/Slicer.app"
+          sudo python3 .github/scripts/mac_tcc_grant.py "$RUNNER_TEMP/Slicer.app"
+
+      - name: What the enabled Slicer hears (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          PROBE_REPORT: ${{ runner.temp }}/probe-enabled.json
+        run: |
+          afplay "$RUNNER_TEMP/tone.wav" &
+          tone=$!
+          sleep 1
+          "$SLICER" --no-splash --disable-settings --ignore-slicerrc --no-main-window \
+            --additional-module-path "$GITHUB_WORKSPACE/GTReview" \
+            --python-script "$GITHUB_WORKSPACE/.github/scripts/microphone_probe.py" || true
+          kill $tone 2> /dev/null || true
+          cat "$PROBE_REPORT"
+
+      - name: Recording integration test in the enabled Slicer (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 25
+        env:
+          GTREVIEW_TEST_LOG: ${{ runner.temp }}/recording-test-enabled.log
+          GTREVIEW_EXPECT_MAC_MICROPHONE: allowed
+        run: |
+          "$SLICER" --no-splash --disable-settings --ignore-slicerrc \
+            --additional-module-path "$GITHUB_WORKSPACE/GTReview" \
+            --python-script "$GITHUB_WORKSPACE/Testing/integration_recording.py" || echo "Slicer exited with $?"
+          cat "$GTREVIEW_TEST_LOG" || true
+          grep -q "^RESULT: PASS" "$GTREVIEW_TEST_LOG"
+
+      - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recording-test-${{ matrix.os }}
-          path: ${{ runner.temp }}/recording-test.log
+          path: |
+            ${{ runner.temp }}/recording-test*.log
+            ${{ runner.temp }}/probe-*.json
           if-no-files-found: ignore

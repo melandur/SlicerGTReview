@@ -561,9 +561,21 @@ share gone) stops the whole recording, keeping what reached the disk; the
 event log is written whatever else fails.
 
 - **macOS.** Slicer as downloaded carries neither the microphone usage
-  description nor the audio-input entitlement macOS requires of a signed app,
-  so macOS hands it silence without asking. GTReview warns after a few seconds
-  of pure silence. Video works.
+  description nor the audio-input entitlement macOS requires of an app signed
+  as Slicer is, so macOS would hand it silence without asking. GTReview sees
+  this up front: *Record microphone* explains it instead of recording silence,
+  and *Record video* records the views without sound. *Enable the microphone…*
+  in the Recording section shows the one Terminal command that changes it for
+  that Slicer.app, to run with Slicer closed:
+
+  ```bash
+  bash <the extension>/Resources/GTReviewMacMicrophone.sh /Applications/Slicer.app
+  ```
+
+  The script adds the microphone permission to that copy of Slicer and signs
+  it again on this Mac; macOS then asks once, the first time GTReview opens
+  the microphone. Run it again after installing a new Slicer; installing
+  Slicer again undoes it.
 - **Windows.** Desktop apps must be allowed the microphone under *Settings ›
   Privacy › Microphone*; a muted or blocked microphone is reported the same
   way.

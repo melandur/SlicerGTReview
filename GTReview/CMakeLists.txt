@@ -34,9 +34,10 @@ set(MODULE_PYTHON_SCRIPTS
 # both from the source tree and from the installed tree.
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
+  Resources/${MODULE_NAME}MacMicrophone.sh
   )
 
-# The spoken clips of narrated recordings, 131 of them, are the one place a
+# The spoken clips of narrated recordings, 532 of them, are the one place a
 # glob is used: what the folder must hold is GTReviewLib.recordlog.VOICE_CLIPS,
 # and Testing/test_wavfile.py fails on any clip missing from it or extra in it,
 # so the folder itself is the list.  Packaging/make_package.sh copies the

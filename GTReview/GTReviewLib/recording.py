@@ -40,7 +40,9 @@ import datetime
 import getpass
 import logging
 import os
+import plistlib
 import queue
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,6 +61,10 @@ from . import maskio, recordlog, wavfile
 #: the spoken clips (whole phrases and single words)
 VOICE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "GTReviewVoice"
+)
+#: run once per Slicer.app so that macOS lets it use the microphone
+MAC_MICROPHONE_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "GTReviewMacMicrophone.sh"
 )
 #: the folder of the batch directory recordings go into
 RECORDINGS_FOLDER = "GTReview-recordings"
@@ -221,6 +227,76 @@ def openFolder(path):
 def _openUrl(path):
     """Explorer on Windows, the Finder on macOS (a seam the tests replace)."""
     return qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+
+
+# --------------------------------------------------------------------------- #
+# macOS: whether Slicer may use the microphone at all
+# --------------------------------------------------------------------------- #
+_MAC_MICROPHONE = {}
+
+
+def macAppBundle():
+    """The Slicer.app this Slicer runs from; None on other systems and when
+    it runs from a build tree."""
+    if sys.platform != "darwin":
+        return None
+    path = os.path.realpath(slicer.app.applicationFilePath())
+    while os.path.dirname(path) != path:
+        if path.endswith(".app"):
+            return path
+        path = os.path.dirname(path)
+    return None
+
+
+def macMicrophoneProblem():
+    """Why macOS will not let this Slicer use the microphone, or None.
+
+    macOS hands an app the microphone only if its Info.plist says what for
+    (NSMicrophoneUsageDescription) and -- signed with the hardened runtime,
+    as the official Slicer builds are -- if its signature carries the
+    audio-input entitlement.  Otherwise the microphone delivers silence and
+    nobody is asked.  Slicer 5.12 has neither; GTReviewMacMicrophone.sh adds
+    both.  Found out once a session; None on other systems."""
+    if "problem" not in _MAC_MICROPHONE:
+        _MAC_MICROPHONE["problem"] = _macMicrophoneProblem()
+    return _MAC_MICROPHONE["problem"]
+
+
+def _macMicrophoneProblem():
+    bundle = macAppBundle()
+    if bundle is None:
+        return None
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as handle:
+            usage = plistlib.load(handle).get("NSMicrophoneUsageDescription")
+    except Exception:  # noqa: BLE001 - unreadable: better say nothing than something wrong
+        logging.debug("GTReview: reading %s's Info.plist failed", bundle, exc_info=True)
+        return None
+    if not usage:
+        return "this Slicer does not tell macOS what it would use the microphone for"
+    # the process that opens the microphone, and the app macOS asks for
+    for code in (os.path.realpath(slicer.app.applicationFilePath()), bundle):
+        signature = _run(["codesign", "-dv", code])
+        if signature is None or "runtime" not in signature[2]:
+            continue  # no hardened runtime: no entitlement needed
+        entitlements = _run(["codesign", "-d", "--entitlements", ":-", code])
+        try:
+            granted = plistlib.loads((entitlements[1] if entitlements else "").encode("utf-8")).get(
+                "com.apple.security.device.audio-input")
+        except Exception:  # noqa: BLE001 - no entitlements at all
+            granted = False
+        if not granted:
+            return "this Slicer's signature does not carry the microphone entitlement"
+    return None
+
+
+def macEnableMicrophoneCommand():
+    """The Terminal command that lets this Slicer use the microphone: the
+    script with this Slicer.app, behind sudo when the user cannot change it."""
+    bundle = macAppBundle() or "/Applications/Slicer.app"
+    writable = os.access(os.path.join(bundle, "Contents", "Info.plist"), os.W_OK)
+    return "{}bash {} {}".format("" if writable else "sudo ", shlex.quote(MAC_MICROPHONE_SCRIPT),
+                                 shlex.quote(bundle))
 
 
 # --------------------------------------------------------------------------- #
@@ -1180,10 +1256,11 @@ class Recorder:
         self._onChange()
 
     # ---------------------------------------------------------------- video
-    def startVideo(self, source="", name="", realm="", label=""):
+    def startVideo(self, source="", name="", realm="", label="", withSound=True):
         """Turn the video switch on: a take of the case on screen, with
-        microphone *name* as its sound.  False when the reader chose to keep
-        the video that case has.  Needs ffmpeg."""
+        microphone *name* as its sound unless not *withSound* (a Mac whose
+        Slicer may not use the microphone).  False when the reader chose to
+        keep the video that case has.  Needs ffmpeg."""
         if self.videoOn:
             return True
         if not findFfmpeg()[0]:
@@ -1193,10 +1270,11 @@ class Recorder:
         if not self._mayReplace(context, [VIDEO], switching=False):
             return False
         silent = None
-        try:
-            self._openMicrophone(name, realm, label)
-        except Exception as error:  # noqa: BLE001 - the video goes ahead without sound
-            silent = str(error)
+        if withSound:
+            try:
+                self._openMicrophone(name, realm, label)
+            except Exception as error:  # noqa: BLE001 - the video goes ahead without sound
+                silent = str(error)
         try:
             self._openTake(VIDEO, context, source)
         except Exception:
@@ -1513,8 +1591,8 @@ class Recorder:
             elif (not self._silenceWarned and not self.mic.heardSomething
                     and now - (self.mic.started or now) > SILENCE_WARNING_SECONDS):
                 self._silenceWarned = True
-                hint = ("macOS keeps the microphone from Slicer unless Slicer may use it, "
-                        "and stock Slicer may not." if sys.platform == "darwin" else
+                hint = ("Check that Slicer may use it: System Settings > Privacy & Security > "
+                        "Microphone." if sys.platform == "darwin" else
                         "Check that the microphone is not muted and that the system lets "
                         "desktop apps use it (Windows: Settings > Privacy > Microphone).")
                 self._onWarning("The microphone records pure silence. " + hint)

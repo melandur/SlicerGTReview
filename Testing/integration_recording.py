@@ -324,6 +324,10 @@ class RecordingIntegrationTest(unittest.TestCase):
         slicer.util.selectModule("GTReview")
         pump()
         cls.widget = slicer.modules.gtreview.widgetRepresentation().self()
+        # what macOS makes of this Slicer (test_18); the stand-in microphone
+        # needs no permission, so the other steps run as if it had one
+        cls.macProblem = recording.macMicrophoneProblem()
+        recording._MAC_MICROPHONE["problem"] = None
         cls.warnings = []
         cls._warningDisplay = slicer.util.warningDisplay
         cls._confirm = slicer.util.confirmYesNoDisplay
@@ -896,10 +900,12 @@ class RecordingIntegrationTest(unittest.TestCase):
         caseOne = self.exported(MICROPHONE, CASE_ONE)
         stamp = os.stat(caseOne).st_mtime_ns
         self.fake()
+        started = time.monotonic()
         widget.recordAudioButton.click()          # CASE_TWO's recording is replaced
         pump(1.0)
         self.asked[:], self.answers[:] = [], [False]
-        widget.onPreviousCase()
+        widget.onPreviousCase()                   # the take ends once the case is up
+        switched = time.monotonic() - started
         pump(0.8)
         CHECKS.check(widget.currentCase().case_id == CASE_ONE, "the first case is open")
         CHECKS.check(self.asked == [(CASE_ONE, (MICROPHONE,), True)], "it has a recording, so it was asked",
@@ -908,9 +914,12 @@ class RecordingIntegrationTest(unittest.TestCase):
                      "\"Stop recording\" stopped it")
         CHECKS.check(waitForFiles(widget), "saved")
         CHECKS.check(os.stat(caseOne).st_mtime_ns == stamp, "the recorded case keeps its recording")
-        CHECKS.check(0.8 < self.seconds(MICROPHONE, CASE_TWO) < 1.8, "the case before was saved")
+        seconds = self.seconds(MICROPHONE, CASE_TWO)
+        CHECKS.check(0.8 < seconds < switched + 0.3, "the case before was saved, up to the switch",
+                     "{:.2f} s of {:.2f} s".format(seconds, switched))
 
         self.answers[:] = [True, True]
+        started = time.monotonic()
         widget.recordAudioButton.click()          # replaces CASE_ONE's
         pump(0.8)
         take = widget.recorder.takes[MICROPHONE]
@@ -918,6 +927,7 @@ class RecordingIntegrationTest(unittest.TestCase):
         pump(0.8)
         CHECKS.check(widget.recorder.takes.get(MICROPHONE) is take, "a reload of the case goes on in the same take")
         widget.onNextCase()                       # replaces CASE_TWO's
+        switched = time.monotonic() - started
         pump(0.8)
         CHECKS.check(widget.recorder.audioOn and widget.recorder.takes[MICROPHONE].name == CASE_TWO,
                      "\"Replace\" records the next case", str(self.asked))
@@ -926,8 +936,9 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(waitForFiles(widget), "saved")
         log = self.log(MICROPHONE, CASE_ONE)
         CHECKS.check("case_reloaded" in [e["type"] for e in log["events"]], "the reload is in the log")
-        CHECKS.check(1.2 < self.seconds(MICROPHONE, CASE_ONE) < 4.0, "the first case got the new take",
-                     "{:.2f} s".format(self.seconds(MICROPHONE, CASE_ONE)))
+        seconds = self.seconds(MICROPHONE, CASE_ONE)
+        CHECKS.check(1.2 < seconds < switched + 0.3, "the first case got the new take, up to the switch",
+                     "{:.2f} s of {:.2f} s".format(seconds, switched))
 
     def test_16_open_folder(self):
         CHECKS.step("Open folder shows the batch's recordings, without Slicer's library paths")
@@ -987,6 +998,45 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(widget.recorder.busyFinishing() == 0 and took < 6.0, "saved in {:.1f} s".format(took))
         CHECKS.check(not self.leftovers(), "nothing else is left in the folders", str(self.leftovers()))
 
+    def test_18_a_slicer_that_macos_keeps_from_the_microphone(self):
+        CHECKS.step("A Slicer macOS keeps from the microphone: an explanation instead of silence")
+        widget = self.widget
+        if sys.platform == "darwin":
+            if os.environ.get("GTREVIEW_EXPECT_MAC_MICROPHONE", "blocked") == "blocked":
+                CHECKS.check(bool(self.macProblem), "the official Slicer is found unable to use the microphone",
+                             str(self.macProblem))
+            else:
+                CHECKS.check(self.macProblem is None, "this Slicer may use the microphone", str(self.macProblem))
+        else:
+            CHECKS.check(self.macProblem is None, "only macOS keeps Slicer from the microphone")
+        shown = []
+        widget._macMicrophoneHelp = lambda: shown.append(True)
+        recording._MAC_MICROPHONE["problem"] = "this Slicer's signature does not carry the microphone entitlement"
+        self.fake()
+        self.warnings[:] = []
+        try:
+            widget.recordAudioButton.click()
+            pump(0.3)
+            CHECKS.check(shown and not widget.recorder.audioOn and not widget.recordAudioButton.checked
+                         and not widget.recorder.capturing, "Record microphone explains, and records nothing")
+            widget.testMicrophoneButton.click()
+            pump(0.3)
+            CHECKS.check(len(shown) == 2 and not widget.recorder.testing, "and so does Test")
+            widget.recordVideoButton.click()
+            pump(recording.SILENCE_WARNING_SECONDS + 1.5)
+            take = widget.recorder.takes.get(VIDEO)
+            CHECKS.check(widget.recorder.videoOn and take is not None and take.wav is None
+                         and not widget.recorder.capturing,
+                         "Record video records the views without sound, the microphone left closed")
+            CHECKS.check(not self.warnings, "and nobody is warned about silence", str(self.warnings))
+            widget.recordVideoButton.click()
+            CHECKS.check(waitForFiles(widget), "saved")
+            CHECKS.check(self.log(VIDEO, CASE_ONE if widget.currentCase().case_id == CASE_ONE else CASE_TWO)
+                         ["video"]["sound"] is False, "its log says it has no sound")
+        finally:
+            recording._MAC_MICROPHONE["problem"] = None
+            del widget._macMicrophoneHelp
+
 
 def main():
     print("=" * 72)
@@ -1001,6 +1051,9 @@ def main():
     except Exception as error:  # noqa: BLE001
         devices = ["listing failed: {}".format(error)]
     print("  inputs  : {}".format(", ".join(devices) or "none"))
+    if sys.platform == "darwin":
+        print("  mac mic : {}".format(recording.macMicrophoneProblem() or "Slicer may use the microphone"))
+        print("  app     : {}".format(recording.macAppBundle()))
     print("=" * 72)
     if not ffmpeg or not shutil.which("ffprobe"):
         print("RESULT: FAIL -- the test needs ffmpeg and ffprobe")
