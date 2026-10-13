@@ -1,0 +1,105 @@
+# The microphone and video recording on Windows and macOS, in the official
+# Slicer 5.12.4: the unit tests in Slicer's Python, then
+# Testing/integration_recording.py inside Slicer (a stand-in microphone,
+# the real views, real ffmpeg encoding).
+name: Recording on Windows and macOS
+
+on:
+  push:
+    branches: [ci/recording-windows-macos]
+  workflow_dispatch:
+
+env:
+  SLICER_WIN_URL: https://download.slicer.org/bitstream/6aa1db04ce9de556d30112bb      # 5.12.4, r34645
+  SLICER_MAC_URL: https://download.slicer.org/bitstream/6aa2063bce9de556d30132d8      # 5.12.4, r34645
+  MESA_URL: https://github.com/pal1000/mesa-dist-win/releases/download/26.2.4/mesa3d-26.2.4-release-msvc.7z
+
+jobs:
+  recording:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Slicer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o "$env:RUNNER_TEMP\slicer.exe" $env:SLICER_WIN_URL
+          Start-Process -Wait -FilePath "$env:RUNNER_TEMP\slicer.exe" -ArgumentList '/S', '/D=C:\Slicer'
+          Get-ChildItem C:\Slicer, C:\Slicer\bin | Select-Object -First 40 | Format-Table -AutoSize Name, Length
+          "SLICER=C:\Slicer\Slicer.exe" >> $env:GITHUB_ENV
+          "PYTHONSLICER=C:\Slicer\bin\PythonSlicer.exe" >> $env:GITHUB_ENV
+          Get-ChildItem -Recurse C:\Slicer\lib\QtPlugins\audio -ErrorAction SilentlyContinue | Format-Table -AutoSize FullName
+
+      - name: Software OpenGL for Slicer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o "$env:RUNNER_TEMP\mesa.7z" $env:MESA_URL
+          7z x "$env:RUNNER_TEMP\mesa.7z" -o"$env:RUNNER_TEMP\mesa" | Out-Null
+          foreach ($dll in 'opengl32.dll', 'libgallium_wgl.dll', 'libglapi.dll', 'dxil.dll') {
+            $source = Join-Path "$env:RUNNER_TEMP\mesa\x64" $dll
+            if (Test-Path $source) { Copy-Item $source C:\Slicer\bin\; "copied $dll" }
+          }
+          "GALLIUM_DRIVER=llvmpipe" >> $env:GITHUB_ENV
+
+      - name: ffprobe for the test's checks (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Install Slicer (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          uname -m; sw_vers; sysctl -n machdep.cpu.brand_string
+          curl -sSL -o "$RUNNER_TEMP/slicer.dmg" "$SLICER_MAC_URL"
+          yes | hdiutil attach "$RUNNER_TEMP/slicer.dmg" -nobrowse -mountpoint /Volumes/Slicer > /dev/null
+          cp -R /Volumes/Slicer/Slicer.app "$RUNNER_TEMP/"
+          hdiutil detach /Volumes/Slicer
+          echo "SLICER=$RUNNER_TEMP/Slicer.app/Contents/MacOS/Slicer" >> "$GITHUB_ENV"
+          echo "PYTHONSLICER=$RUNNER_TEMP/Slicer.app/Contents/bin/PythonSlicer" >> "$GITHUB_ENV"
+          file "$RUNNER_TEMP/Slicer.app/Contents/MacOS/Slicer" "$RUNNER_TEMP/Slicer.app/Contents/bin/SlicerApp-real"
+          ls "$RUNNER_TEMP/Slicer.app/Contents/lib/QtPlugins/audio" || true
+          codesign -dv "$RUNNER_TEMP/Slicer.app" 2>&1 | grep -E "Identifier|flags|Authority" || true
+          codesign -d --entitlements - --xml "$RUNNER_TEMP/Slicer.app/Contents/bin/SlicerApp-real" 2>/dev/null | plutil -p - || true
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$RUNNER_TEMP/Slicer.app/Contents/Info.plist" || echo "no NSMicrophoneUsageDescription"
+
+      - name: ffprobe for the test's checks (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: ffmpeg in Slicer's Python, as "Get ffmpeg..." installs it
+        shell: bash
+        run: |
+          "$PYTHONSLICER" -m pip install --quiet imageio-ffmpeg
+          "$PYTHONSLICER" -c "import imageio_ffmpeg, subprocess; exe = imageio_ffmpeg.get_ffmpeg_exe(); print(exe); print(subprocess.run([exe, '-version'], capture_output=True, text=True).stdout.splitlines()[0])"
+
+      - name: Unit tests in Slicer's Python
+        shell: bash
+        run: |
+          "$PYTHONSLICER" -m unittest discover -s Testing -p "test_*.py" 2>&1 | tail -30
+
+      - name: Recording integration test in Slicer
+        shell: bash
+        timeout-minutes: 25
+        env:
+          GTREVIEW_TEST_LOG: ${{ runner.temp }}/recording-test.log
+        run: |
+          "$SLICER" --no-splash --disable-settings --ignore-slicerrc \
+            --additional-module-path "$GITHUB_WORKSPACE/GTReview" \
+            --python-script "$GITHUB_WORKSPACE/Testing/integration_recording.py" || echo "Slicer exited with $?"
+          cat "$GTREVIEW_TEST_LOG" || true
+          grep -q "^RESULT: PASS" "$GTREVIEW_TEST_LOG"
+
+      - name: Keep the test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recording-test-${{ matrix.os }}
+          path: ${{ runner.temp }}/recording-test.log
+          if-no-files-found: ignore

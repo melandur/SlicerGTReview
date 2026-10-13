@@ -215,7 +215,12 @@ def openFolder(path):
                 # manager is up, and must not stay a zombie meanwhile
                 threading.Thread(target=process.wait, name="GTReview xdg-open", daemon=True).start()
                 return True
-    return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path)))
+    return bool(_openUrl(path))
+
+
+def _openUrl(path):
+    """Explorer on Windows, the Finder on macOS (a seam the tests replace)."""
+    return qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
 
 
 # --------------------------------------------------------------------------- #

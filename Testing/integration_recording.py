@@ -51,7 +51,9 @@ GTREVIEW_KEEP_RECORDINGS=1 to keep the temporary batch and its recordings.
 """
 
 import json
+import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -74,6 +76,31 @@ if _MODULE_DIR not in sys.path:
 
 import GTReview as gtreview  # noqa: E402
 from GTReviewLib import recordlog, recording, wavfile  # noqa: E402
+
+
+class _Tee(object):
+    """Everything printed, also into GTREVIEW_TEST_LOG: Slicer on Windows is a
+    GUI program, and what it prints reaches no console."""
+
+    def __init__(self, *streams):
+        self.streams = [s for s in streams if s is not None]
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+if os.environ.get("GTREVIEW_TEST_LOG"):
+    sys.stdout = _Tee(sys.stdout, open(os.environ["GTREVIEW_TEST_LOG"], "w", encoding="utf-8", buffering=1))
+    # and GTReview's own warnings with it, which otherwise only reach Slicer's log
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setLevel(logging.WARNING)
+    _handler.setFormatter(logging.Formatter("  [log] %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_handler)
 
 MICROPHONE, VIDEO = recording.MICROPHONE, recording.VIDEO
 SIZE = (40, 40, 12)
@@ -914,19 +941,18 @@ class RecordingIntegrationTest(unittest.TestCase):
             def wait(self, timeout=None):
                 return 0
 
-        original = recording.subprocess.Popen
+        original, originalUrl = recording.subprocess.Popen, recording._openUrl
         opened = []
-        originalUrl = qt.QDesktopServices.openUrl
         recording.subprocess.Popen = Started
-        qt.QDesktopServices.openUrl = lambda url: opened.append(url.toLocalFile()) or True
+        recording._openUrl = lambda path: opened.append(path) or True
         try:
             widget.onOpenRecordingsFolder()
         finally:
-            recording.subprocess.Popen = original
-            qt.QDesktopServices.openUrl = originalUrl
+            recording.subprocess.Popen, recording._openUrl = original, originalUrl
         folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
         if not sys.platform.startswith("linux"):
-            CHECKS.check(opened == [folder], "the system opens the recordings folder", str(opened))
+            CHECKS.check([os.path.normcase(p) for p in opened] == [os.path.normcase(folder)],
+                         "Explorer or the Finder opens the recordings folder", str(opened))
             return
         CHECKS.check(len(calls) == 1 and os.path.basename(calls[0][0][0]) == "xdg-open"
                      and calls[0][0][1] == folder, "xdg-open opens GTReview-recordings", str(calls))
@@ -965,9 +991,16 @@ class RecordingIntegrationTest(unittest.TestCase):
 def main():
     print("=" * 72)
     print("GTReview recording integration test")
-    print("  Slicer  : {}".format(slicer.app.applicationVersion))
+    print("  Slicer  : {} ({}, Python {})".format(slicer.app.applicationVersion, platform.platform(),
+                                                platform.python_version()))
+    print("  machine : {}".format(platform.machine()))
     ffmpeg = recording.findFfmpeg()[0]
     print("  ffmpeg  : {}".format(ffmpeg or "none"))
+    try:
+        devices = ["{} [{}]".format(d["label"], d["realm"]) for d in recording.inputDevices()]
+    except Exception as error:  # noqa: BLE001
+        devices = ["listing failed: {}".format(error)]
+    print("  inputs  : {}".format(", ".join(devices) or "none"))
     print("=" * 72)
     if not ffmpeg or not shutil.which("ffprobe"):
         print("RESULT: FAIL -- the test needs ffmpeg and ffprobe")
