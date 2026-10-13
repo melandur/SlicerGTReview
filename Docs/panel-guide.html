@@ -14,12 +14,13 @@
     --ink-mute:    #6b7686;
     --rule:        #dde2ea;
 
-    /* The four accents are the module's own section colours, not decoration:
+    /* The accents are the module's own section colours, not decoration:
        each one matches the tint on that section's header inside Slicer. */
     --dataset:  #2f7fd0;
     --display:  #2f9f6f;
     --lesions:  #b0742a;
     --editing:  #8a5fd0;
+    --recording: #c43c3c;
 
     --label-1: #d92b2b;
     --label-2: #2f9c3b;
@@ -45,6 +46,7 @@
       --display:  #58c496;
       --lesions:  #dda85f;
       --editing:  #ad8ce6;
+      --recording: #ec7a7a;
 
       --label-1: #f26a6a;
       --label-2: #62c96f;
@@ -70,6 +72,7 @@
     --display:  #58c496;
     --lesions:  #dda85f;
     --editing:  #ad8ce6;
+    --recording: #ec7a7a;
 
     --label-1: #f26a6a;
     --label-2: #62c96f;
@@ -283,6 +286,7 @@
     <p class="standfirst">The module panel has four sections, and you work down them in order:
       <strong>Dataset</strong> picks the case, <strong>Display</strong> sets up what you see,
       <strong>Lesions</strong> lists what there is to check, <strong>Editing</strong> changes it.
+      A fifth, <strong>Recording</strong>, is optional and runs alongside the other four.
       Each control below is named exactly as it appears on screen.</p>
   </header>
 
@@ -297,6 +301,8 @@
         <span>Lesions<span class="note">what to check</span></span></a></li>
       <li><a href="#editing"><span class="chip" style="background: var(--editing)"></span>
         <span>Editing<span class="note">what you change</span></span></a></li>
+      <li><a href="#recording"><span class="chip" style="background: var(--recording)"></span>
+        <span>Recording<span class="note">what you say and see</span></span></a></li>
       <li><a href="#loop"><span class="chip" style="background: var(--ink-mute)"></span>
         <span>The loop<span class="note">and shortcuts</span></span></a></li>
     </ol>
@@ -655,6 +661,98 @@
               is always a new file.</p>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ========================================================== RECORDING -->
+    <section id="recording" style="--accent: var(--recording)">
+      <div class="sec-head">
+        <span class="sec-swatch" style="background: var(--recording)"></span>
+        <h2>Recording</h2>
+      </div>
+      <p class="sec-sub">Optional. Talk through the review and keep the views on video, so whoever
+        listens or re-annotates later knows which lesion you meant at every moment. With both
+        buttons off nothing here does anything.</p>
+
+      <div class="controls">
+        <div class="ctl">
+          <div class="ctl-name">Record microphone · Record video<span class="kind">buttons</span></div>
+          <div class="ctl-body">
+            <p>Two independent switches; use either or both. While one is on, a red
+              <strong>&#9679; REC</strong> shows in Slicer's status bar and the time runs next to the
+              buttons. Press again to stop.</p>
+            <p>Recordings are kept <strong>per case</strong>: moving to another case closes the
+              files of the one you leave and starts new ones, without a gap. They go into
+              <code>GTReview-recordings/&lt;case&gt;/</code> inside the batch folder (into your home
+              folder if the batch folder cannot be written). <em>Open folder</em> shows them.</p>
+            <p>Every switch to another lesion is logged with the lesion number <em>and a voxel
+              inside it</em>. The number alone would not do: it is a rank by size and changes
+              when lesions are deleted or grow, the voxel does not.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Microphone<span class="kind">dropdown · Test</span></div>
+          <div class="ctl-body">
+            <p>The input to record. <code>System default</code> follows whatever the system uses;
+              the others are the microphones found, by name. Plugged one in? Press the refresh
+              button next to the list. The choice is remembered.</p>
+            <p><em>Test</em> opens the microphone for ten seconds and moves the level bar
+              underneath, without saving anything. Speak: if the bar does not move, it is the
+              wrong input.</p>
+            <p>Unplug the microphone while recording and its recording stops, with a warning;
+              what it had recorded is kept. (Otherwise the system would quietly carry on from
+              another microphone.)</p>
+            <p>The recording itself is your voice as captured, plus a <strong>narrated
+              copy</strong>: a short chime and a voice saying <em>“lesion three”</em> wherever you
+              moved to another lesion (<em>“new lesion four”</em> for one you just painted,
+              <em>“now lesion two”</em> when a recount renumbered the one you are on). Your voice
+              is turned down under the announcement, never cut. Paging quickly through the list
+              announces only the lesion you stop on.</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">Video<span class="kind">dropdown</span></div>
+          <div class="ctl-body">
+            <p><code>All views</code> records the view area as laid out — every sequence side by
+              side in <em>Sequences (axial)</em>. Or pick one slice view; it is recorded with its
+              slider bar, which shows the slice position. Can be changed while recording.</p>
+            <p>A banner across the top of the video names the case and the lesion you are on, with
+              its number, label, size and voxel. The picture comes from Slicer's own views, not
+              from the screen: other windows on top, a second monitor, nothing gets in.</p>
+            <p>With ffmpeg the video is an MP4 at 10 frames a second carrying the narrated audio and
+              one chapter per lesion. Without it, a Theora <code>.ogv</code> at 5 frames a second
+              (VLC plays it). <em>Get ffmpeg…</em> downloads it into Slicer once (about 30 MB).</p>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-name">What is saved<span class="kind">files</span></div>
+          <div class="ctl-body">
+            <ul>
+              <li><code>&lt;case&gt;_&lt;date-time&gt;.wav</code> — the narrated recording, for
+                listening.</li>
+              <li><code>…_mic.wav</code> — the microphone untouched, for transcription.</li>
+              <li><code>….srt</code> — the active lesion as subtitles (VLC and mpv show them with
+                the audio or the video). <code>…_labels.txt</code> — the same as an Audacity
+                label track (<em>File › Import › Labels</em>).</li>
+              <li><code>….mp4</code> or <code>….ogv</code> — the video.</li>
+              <li><code>….json</code> — every event in order, with times and the lesion's voxel:
+                the record to re-annotate from.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="note-box">
+        <p><strong>macOS:</strong> Slicer as downloaded has no permission to use the microphone,
+          so the recording comes out silent. GTReview warns after a few seconds of pure silence.
+          Video works everywhere. <strong>Windows:</strong> desktop apps must be allowed the
+          microphone under <em>Settings › Privacy › Microphone</em>.</p>
+        <p>A voice recording is personal data, and the video shows the scans: keep recordings
+          wherever the batch itself may be kept, and agree on recording with whoever is
+          recorded.</p>
       </div>
     </section>
 

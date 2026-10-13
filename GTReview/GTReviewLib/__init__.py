@@ -1,7 +1,10 @@
 """GTReviewLib — pure-python helpers for the GTReview Slicer extension.
 
-Nothing in this package may import ``slicer``, ``vtk`` or ``qt``: the modules are
-unit-testable under plain ``PythonSlicer -m unittest``.
+The pure modules import nothing of ``slicer``, ``vtk`` or ``qt``, so they are
+unit-testable under plain ``PythonSlicer -m unittest``.  Two modules are the
+Slicer side and are imported only inside Slicer, never from here: the Sphere
+threshold effect, and ``recording`` (microphone and video capture), whose pure
+halves are ``recordlog`` and ``wavfile``.
 
 ``dataset`` is always available (standard library only).  ``lesions`` and
 ``maskio`` need numpy / scipy / SimpleITK and are imported defensively so that

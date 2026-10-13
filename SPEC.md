@@ -42,7 +42,8 @@ Classify by key (case-insensitive), first match wins:
 3. otherwise -> image sequence
 
 ## Output contract
-Saving writes `<case_dir>/<case_id>_reviewed_seg.nii.gz`.
+Saving writes `<case_dir>/<case_id>_reviewed_seg.nii.gz`.  Recordings (feature 8)
+go into `<batch_dir>/GTReview-recordings/<case_id>/`, never into a case dir.
 - Original files are opened read-only and never overwritten.
 - If `_reviewed_seg.nii.gz` already exists it is loaded as the starting mask
   (resume a review) and overwritten on save, after a confirmation prompt.
@@ -74,6 +75,14 @@ Saving writes `<case_dir>/<case_id>_reviewed_seg.nii.gz`.
    range — drag to pull a physical sphere, release to add every in-range voxel in
    the sphere that is connected to the seed; one undo step, plain voxel mask.  The
    3D surface is unsmoothed so it follows the voxels.
+8. **Recording** — optional, on top of the unchanged review: *Record microphone*
+   (a chosen input device; Qt Multimedia, which Slicer ships) and *Record video*
+   (Slicer's own views, rendered, not the screen), kept per case.  Every lesion
+   event is logged with the number shown AND a seed voxel inside the lesion
+   (numbers are ranks and change on recount); a narrated copy of the microphone
+   track speaks each lesion switch, and the video carries a banner naming the
+   case and the lesion.  Capture stays in Slicer's process; encoding and the
+   finished files are made off the main thread.  See README, *Recording*.
 
 ## Architecture decisions (binding — do not re-litigate)
 - **The mask lives in a `vtkMRMLSegmentationNode`**, one segment per label value.
@@ -102,11 +111,18 @@ gt_tool_slicer/
       dataset.py                       # case discovery  (NO slicer imports)
       lesions.py                       # connected components (NO slicer imports)
       maskio.py                        # nifti read/write preserving geometry (SimpleITK only)
+      recordlog.py                     # recording events and sidecars (NO slicer imports)
+      wavfile.py                       # WAV writing, cue points, narration (numpy only)
+      recording.py                     # microphone / video capture (Slicer side)
+    Resources/GTReviewVoice/*.wav      # spoken clips for the narration
   Testing/
     test_dataset.py
     test_lesions.py
     test_maskio.py
+    test_recordlog.py
+    test_wavfile.py
     smoke_headless.py                  # runs inside Slicer --no-main-window
+    integration_recording.py           # runs inside Slicer with a main window
 ```
 
 ## Python API contract (binding — implement these signatures verbatim)

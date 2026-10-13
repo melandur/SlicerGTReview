@@ -77,12 +77,19 @@ for _name in [_n for _n in list(sys.modules)
 del _name, _file
 
 try:
-    from GTReviewLib import dataset, layouts, lesions, maskio, sessionlog, undobudget
+    from GTReviewLib import dataset, layouts, lesions, maskio, recordlog, sessionlog, undobudget
 except ImportError as exc:  # pragma: no cover - broken install
     raise ImportError(
         "GTReview could not import GTReviewLib from {} — is the extension "
         "installed completely? ({})".format(_THIS_DIR, exc)
     )
+
+# Recording needs Qt Multimedia; a Slicer built without it still reviews.
+try:
+    from GTReviewLib import recording
+except Exception:  # noqa: BLE001 - pragma: no cover - Slicer without Qt Multimedia
+    logging.warning("GTReview: recording is unavailable", exc_info=True)
+    recording = None
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +100,11 @@ SEGMENT_LABEL_TAG = "GTReviewLabelValue"
 #: where the batch-directory history lives, and how many entries are kept
 DATASET_HISTORY_KEY = "GTReview/DatasetDirectoryHistory"
 DATASET_HISTORY_LIMIT = 10
+
+#: the microphone ("<name>\n<realm>", empty for the system default) and the
+#: video source (a slice view name, empty for all views) picked for recording
+RECORDING_MICROPHONE_KEY = "GTReview/RecordingMicrophone"
+RECORDING_VIDEO_SOURCE_KEY = "GTReview/RecordingVideoSource"
 
 #: Every macOS-only decision in this file reads this one flag, at call time, so
 #: a test on another platform can patch it and exercise the Mac behaviour.
@@ -1110,6 +1122,18 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._errorLogEntry = None
         self._readingErrorLog = False
         self._watchdogTimer = None
+        # Recording (see _buildRecordingSection): the recorder; the selection
+        # last logged into it, as {"seed", "number"}, to tell a move to another
+        # lesion from a renumbering; when the table selection last changed, so
+        # the click that made it is not logged as a second visit; the batch
+        # folder the cases came from; and the red REC label in the status bar
+        self.recorder = None
+        self._loggedLesion = None
+        self._lesionSelectedAt = 0.0
+        self.batchDirectory = None
+        self._recIndicator = None
+        self.recordAudioButton = None
+        self.recordVideoButton = None
 
     # ------------------------------------------------------------------- setup
     def setup(self):
@@ -1131,6 +1155,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._buildDisplaySection()
         self._buildLesionSection()
         self._buildEditingSection()
+        self._buildRecordingSection()
         self.layout.addStretch(1)
         # after the stretch, so it is pinned to the bottom of the panel rather
         # than following the sections up
@@ -1901,6 +1926,139 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "effectRegistered(QString)", self.editorEffectRegistered
         )
 
+    # -- recording ----------------------------------------------------------- #
+    def _buildRecordingSection(self):
+        """Microphone and video switches on top of the review.
+
+        Nothing about the review changes while they are off.  While either is
+        on, every lesion switch is logged with its seed voxel and spoken into a
+        narrated copy of the microphone track, and the video carries a banner
+        naming the case and the active lesion (GTReviewLib.recording).
+        """
+        section = ctk.ctkCollapsibleButton()
+        section.text = "Recording"
+        self._accentSection(section, self.ACCENT_RECORDING, "Recording")
+        self.layout.addWidget(section)
+        form = self._tighten(qt.QFormLayout(section))
+        if recording is None:
+            form.addRow(qt.QLabel("Recording is unavailable in this Slicer (see the log)."))
+            return
+
+        buttons = qt.QHBoxLayout()
+        buttons.setSpacing(4)
+        self.recordAudioButton = qt.QPushButton("Record microphone")
+        self.recordAudioButton.setCheckable(True)
+        self.recordAudioButton.setIcon(self._recordIcon())
+        self.recordAudioButton.toolTip = (
+            "Record the microphone chosen below, per case, into GTReview-recordings "
+            "in the batch folder.\nA copy is narrated: every switch to another lesion "
+            "is announced (\"lesion three\") so the recording alone tells which lesion "
+            "you were on."
+        )
+        self.recordAudioButton.connect("toggled(bool)", self.onRecordAudioToggled)
+        self.recordVideoButton = qt.QPushButton("Record video")
+        self.recordVideoButton.setCheckable(True)
+        self.recordVideoButton.setIcon(self._recordIcon())
+        self.recordVideoButton.toolTip = (
+            "Record the views chosen below, per case, with a banner naming the case "
+            "and the active lesion.\nTaken from Slicer's own views, not the screen."
+        )
+        self.recordVideoButton.connect("toggled(bool)", self.onRecordVideoToggled)
+        self.recordingClockLabel = qt.QLabel("")
+        buttons.addWidget(self.recordAudioButton, 1)
+        buttons.addWidget(self.recordVideoButton, 1)
+        buttons.addWidget(self.recordingClockLabel)
+        form.addRow(buttons)
+
+        microphoneRow = qt.QHBoxLayout()
+        microphoneRow.setSpacing(4)
+        self.microphoneComboBox = qt.QComboBox()
+        self.microphoneComboBox.sizeAdjustPolicy = qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        self.microphoneComboBox.minimumContentsLength = 12
+        self.microphoneComboBox.toolTip = "The microphone the recording uses."
+        self.microphoneComboBox.connect("activated(int)", self.onMicrophoneChanged)
+        refreshButton = qt.QToolButton()
+        refreshButton.setIcon(slicer.app.style().standardIcon(qt.QStyle.SP_BrowserReload))
+        refreshButton.toolTip = "Look for microphones again (after plugging one in)."
+        refreshButton.connect("clicked()", self.onRefreshMicrophones)
+        self.testMicrophoneButton = qt.QToolButton()
+        self.testMicrophoneButton.text = "Test"
+        self.testMicrophoneButton.setCheckable(True)
+        self.testMicrophoneButton.toolTip = (
+            "Open the microphone for ten seconds and watch the level below; nothing is saved."
+        )
+        self.testMicrophoneButton.connect("toggled(bool)", self.onTestMicrophoneToggled)
+        microphoneRow.addWidget(self.microphoneComboBox, 1)
+        microphoneRow.addWidget(refreshButton)
+        microphoneRow.addWidget(self.testMicrophoneButton)
+        form.addRow("Microphone:", microphoneRow)
+
+        self.microphoneLevelBar = qt.QProgressBar()
+        self.microphoneLevelBar.setRange(0, 100)
+        self.microphoneLevelBar.setTextVisible(False)
+        self.microphoneLevelBar.setMaximumHeight(6)
+        self.microphoneLevelBar.toolTip = "Microphone level while it is open."
+        form.addRow("", self.microphoneLevelBar)
+
+        self.videoSourceComboBox = qt.QComboBox()
+        self.videoSourceComboBox.toolTip = (
+            "What the video shows: every view as laid out, or one slice view "
+            "with its slider bar.  Can be changed while recording."
+        )
+        self.videoSourceComboBox.connect("activated(int)", self.onVideoSourceChanged)
+        form.addRow("Video:", self.videoSourceComboBox)
+
+        self.recordingStatusLabel = qt.QLabel("")
+        self.recordingStatusLabel.wordWrap = True
+        self.recordingStatusLabel.textFormat = qt.Qt.RichText
+        form.addRow(self.recordingStatusLabel)
+
+        actions = qt.QHBoxLayout()
+        actions.setSpacing(4)
+        actions.addStretch(1)
+        self.getFfmpegButton = qt.QPushButton("Get ffmpeg...")
+        self.getFfmpegButton.toolTip = (
+            "Install ffmpeg from PyPI (imageio-ffmpeg, about 30 MB): MP4 video at "
+            "10 frames per second, with the narrated audio and a chapter per lesion."
+        )
+        self.getFfmpegButton.connect("clicked()", self.onGetFfmpeg)
+        actions.addWidget(self.getFfmpegButton)
+        self.openRecordingsButton = qt.QPushButton("Open folder")
+        self.openRecordingsButton.toolTip = "Show the recordings of this batch."
+        self.openRecordingsButton.connect("clicked()", self.onOpenRecordingsFolder)
+        actions.addWidget(self.openRecordingsButton)
+        form.addRow(actions)
+
+        self.recorder = recording.Recorder(
+            self._recordingContext,
+            onChange=self._updateRecordingControls,
+            onLevel=self._onRecorderLevel,
+            onTick=self._onRecorderTick,
+            onWarning=self._onRecorderWarning,
+            onSegment=self._onRecordingSegment,
+        )
+        self._refreshMicrophones()
+        self._refreshVideoSources()
+        self._updateRecordingControls()
+
+    @staticmethod
+    def _recordIcon(size=14, scale=6):
+        """A red dot, the universal record sign; theme independent."""
+        box = int(size * scale)
+        pixmap = qt.QPixmap(box, box)
+        pixmap.fill(qt.QColor(0, 0, 0, 0))
+        painter = qt.QPainter()
+        painter.begin(pixmap)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setPen(qt.Qt.NoPen)
+            painter.setBrush(qt.QColor(214, 40, 40))
+            margin = box // 8
+            painter.drawEllipse(margin, margin, box - 2 * margin, box - 2 * margin)
+        finally:
+            painter.end()
+        return qt.QIcon(pixmap)
+
     def editorEffectRegistered(self, effectName=None):
         del effectName
         if self.editor is not None:
@@ -2183,6 +2341,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def onSceneStartClose(self, caller=None, event=None):
         del caller, event
+        self._stopRecording("the scene is closing")
         self._cancelNewLesion()
         self.clearLesionHighlight()
         self._unobserveSegmentEditorNode()
@@ -2259,6 +2418,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.editor.updateWidgetFromMRML()
 
     def cleanup(self):
+        if self.recorder is not None:
+            # Slicer is closing or the module reloads: finish the files first
+            try:
+                if not self.recorder.shutdown():
+                    logging.warning("GTReview: a recording was still being written when Slicer closed")
+            except Exception:  # noqa: BLE001 - the module unload must go ahead
+                logging.exception("GTReview: stopping the recording failed")
+            self._showRecordingIndicator(False)
         self._cancelNewLesion()
         self.clearLesionHighlight()
         self.removeShortcuts()
@@ -2486,7 +2653,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # as they are: nothing was loaded in their place.
             self._reportDeniedDirectory(root, denied)
             return
+        # recordings live in the batch folder, which is about to change
+        self._stopRecording("another batch is loaded")
         self.cases = cases
+        self.batchDirectory = os.path.abspath(os.path.expanduser(str(root))) if cases else None
         if not self.cases:
             self.caseStatusLabel.text = (
                 "0 cases found in {} — did you mean a batch_NN folder? "
@@ -2798,6 +2968,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._populateLesionTable()
             self._updateCaseControls()
             self._updateEditingControls()
+            self._afterCaseChangeForRecording()
             return
         with BusyCursor("GTReview: loading {} ...".format(case.case_id)):
             self.logic.loadCase(case, maskPath=maskPath)
@@ -2828,6 +2999,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self._updateCaseControls()
         self._updateEditingControls()
+        self._afterCaseChangeForRecording()
 
         if self.logic.geometryWarning:
             slicer.util.warningDisplay(self.logic.geometryWarning, windowTitle="GTReview")
@@ -2838,6 +3010,20 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 ),
                 5000,
             )
+
+    def _afterCaseChangeForRecording(self):
+        """A case was (re)loaded: the views it lays out can be recorded, and a
+        running recording closes the previous case's files and opens this one's."""
+        if self.recorder is None:
+            return
+        self._refreshVideoSources()
+        try:
+            self.recorder.caseChanged()
+        except Exception:  # noqa: BLE001 - a recording must never block a case
+            logging.exception("GTReview: switching the recording to the new case failed")
+            self.recorder.stopAll()
+        self._updateRecordingBanner(None)
+        self._updateRecordingControls()
 
     def _resetUndoBudget(self):
         """Forget the previous case's history: a new segmentation clears it."""
@@ -2914,6 +3100,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     ACCENT_DISPLAY = "#2f9f6f"    # green  - what you see
     ACCENT_LESIONS = "#d08a2f"    # amber  - what you inspect
     ACCENT_EDITING = "#8a5fd0"    # purple - what you change
+    ACCENT_RECORDING = "#c43c3c"  # red    - what you say and see
 
     def _accentSection(self, section, color, name):
         """Tint a collapsible section, header and body, with its accent colour.
@@ -3398,6 +3585,17 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if wasStroke:
             serial = self._editSerial
             qt.QTimer.singleShot(0, lambda: self._finishEdit(serial))
+            if self.recorder is not None and self.recorder.segment is not None:
+                try:
+                    effect = self.editor.activeEffect() if self.editor is not None else None
+                    lesion = self.selectedLesion()
+                    self.recorder.note(
+                        "stroke", detail=str(effect.name) if effect is not None else "",
+                        number=int(lesion.index) if lesion is not None else None,
+                        new_lesion=self._newLesion is not None,
+                    )
+                except Exception:  # noqa: BLE001 - never raise out of a VTK observer
+                    logging.debug("GTReview: logging the stroke failed", exc_info=True)
 
     def _onStrokeMove(self, caller=None, event=None):
         """Keep the history in budget while a Live fill stroke grows the mask.
@@ -3636,6 +3834,9 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._layoutChosenByUser = True
         self.applyLayout()
         self.applyViewLayers()
+        if self.recorder is not None:
+            self._refreshVideoSources()
+            self._recordingNote("layout", detail=str(self.layoutComboBox.currentText))
 
     def _sequencesLayoutActive(self):
         value = self.layoutComboBox.itemData(self.layoutComboBox.currentIndex)
@@ -3846,6 +4047,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._updatingGui = previous
         self._updateLesionSummary()
         self._updateEditingControls()
+        # a recount may have renumbered the selected lesion, or erased it
+        self._noteLesionState()
 
     def _updateLesionSummary(self):
         totalVoxels = sum(lesion.voxel_count for lesion in self.lesionList)
@@ -4106,12 +4309,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         selectionModel = self.lesionTable.selectionModel()
         rows = selectionModel.selectedRows() if selectionModel else []
+        self._lesionSelectedAt = time.monotonic()
         if not rows:
             # a real deselect (Ctrl+click) must lock the brush again, so do not
             # fall back to the remembered index here
             self.selectedLesionIndex = None
             self.selectedLesionSeed = None
             self._updateEditingControls()
+            self._noteLesionState()
             return
         lesion = self.selectedLesion()
         if lesion is None:
@@ -4121,6 +4326,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.selectedLesionSeed = tuple(int(value) for value in lesion.centroid_ijk)
         self._selectSegmentForLabel(lesion.label)
         self._updateEditingControls()
+        self._noteLesionState()
         self.jumpToLesion(lesion)
 
     @guarded("Selecting the lesion")
@@ -4131,6 +4337,9 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         lesion = self.selectedLesion()
         if lesion is not None:
+            # the click that changed the selection is not a second visit
+            if time.monotonic() - self._lesionSelectedAt > 0.5:
+                self._recordingNote(recordlog.LESION_REVISITED, **self._lesionFields(lesion))
             self.jumpToLesion(lesion)
 
     @staticmethod
@@ -4493,6 +4702,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         ):
             return
         mask = lesions.lesion_mask(self.componentMap, lesion.index)
+        self._recordingNote("lesion_deleted", **self._lesionFields(lesion))
         self._markEdit()
         with BusyCursor("GTReview: deleting lesion {} ...".format(lesion.index)):
             self.logic.deleteLesionVoxels(mask)
@@ -4602,6 +4812,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             removed = self.logic.deleteLabelVoxels(label)
         self._finishEdit()
         logging.info("GTReview: label %s deleted (%d voxels)", nameForLabelValue(label), removed)
+        self._recordingNote("label_deleted", label=label, voxels=int(removed),
+                            detail=nameForLabelValue(label))
         self._clearLesionSelection()
         self.unsavedChanges = True
         self.refreshLesions()
@@ -4636,6 +4848,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "GTReview: lesion %d relabelled %s -> %s",
             lesion.index, nameForLabelValue(int(lesion.label)), nameForLabelValue(target),
         )
+        fields = self._lesionFields(lesion)
+        fields.update(new_label=int(target), detail="{} -> {}".format(
+            nameForLabelValue(int(lesion.label)), nameForLabelValue(target)))
+        self._recordingNote("lesion_relabelled", **fields)
         self.unsavedChanges = True
         self.refreshLesions()
         # the rebuild restores the selection silently; re-sync the brush label
@@ -4691,6 +4907,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         }
         self._clearLesionSelection()
         self._updateEditingControls()  # unlocks the brush for the new mode
+        self._recordingNote("new_lesion_mode", label=value, detail=nameForLabelValue(value))
+        self._noteLesionState()
         self._selectSegmentForLabel(value)
         self.onActivateEffect("Paint")
         slicer.util.showStatusMessage(
@@ -4726,6 +4944,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             finally:
                 self._updatingGui = previous
         self._updateEditingControls()  # locks the brush again unless a row is selected
+        self._recordingNote("new_lesion_cancelled")
+        self._updateRecordingBanner(self.selectedLesion() if self.logic.segmentationNode else None)
 
     def _adoptNewLesion(self):
         """After a recount in new-lesion mode, select what was just painted."""
@@ -4764,6 +4984,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._selectRowForLesionIndex(chosen.index)
         self._selectSegmentForLabel(chosen.label)
         self._updateEditingControls()
+        self._noteLesionState(adopted=True)
         logging.info(
             "GTReview: new lesion %d adopted as %s%s",
             chosen.index, nameForLabelValue(int(chosen.label)),
@@ -4928,6 +5149,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._redoPending = True
                 if target is not None and here is not None:
                     self._redoTargets.append(here)
+                self._recordingNote("undo")
             self._afterHistoryStep(moved)
         finally:
             self._historyStepping = False
@@ -4948,6 +5170,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             if moved and target is not None and here is not None:
                 self._strokeStarts.append(here)
+            if moved:
+                self._recordingNote("redo")
             self._afterHistoryStep(moved)
         finally:
             self._historyStepping = False
@@ -5118,7 +5342,375 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # nobody has reviewed
         self.reviewedSeeds.pop(case.directory, None)
         logging.info("GTReview: case %s reset to its mask on disk", case.case_id)
+        self._recordingNote("case_reset")
         self.loadCurrentCase(maskPath=self.logic.maskPath)
+
+    # --------------------------------------------------------- recording slots
+    def _recordingNote(self, kind, **fields):
+        """Log an event into a running recording; nothing when none runs."""
+        if self.recorder is not None and self.recorder.segment is not None:
+            self.recorder.note(kind, **fields)
+
+    def _lesionFields(self, lesion):
+        """What the event log keeps about a lesion.
+
+        The number is what the reader sees and says; the seed voxel (an index
+        into the mask's own [i, j, k] grid, which the reviewed mask keeps) is
+        what still finds the same lesion after a recount renumbered it.
+        """
+        seed = tuple(int(v) for v in lesion.centroid_ijk)
+        fields = {
+            "number": int(lesion.index),
+            "count": len(self.lesionList),
+            "label": int(lesion.label),
+            "label_name": LABEL_NAMES.get(int(lesion.label), str(lesion.label)),
+            "voxels": int(lesion.voxel_count),
+            "volume_mm3": float(lesion.volume_mm3),
+            "seed_ijk": list(seed),
+            "bbox_ijk": [[int(a), int(b)] for a, b in lesion.bbox_ijk],
+        }
+        try:
+            fields["seed_ras"] = [round(float(v), 3) for v in self.logic.centroidToRAS(seed)]
+        except Exception:  # noqa: BLE001 - no reference volume (unloading)
+            pass
+        return fields
+
+    def _noteLesionState(self, adopted=False):
+        """Log a change of the active lesion into a running recording.
+
+        Called after every path that can move the selection: a row picked,
+        "New lesion" adopting a stroke, and every recount, which may renumber
+        the selected lesion or drop it.  Comparing seeds tells a move to
+        another lesion from a renumbering of the same one.  Also keeps the
+        video banner current.
+        """
+        lesion = self.selectedLesion() if self.logic.segmentationNode is not None else None
+        current = None
+        if lesion is not None:
+            current = {"seed": tuple(int(v) for v in lesion.centroid_ijk), "number": int(lesion.index)}
+        previous = self._loggedLesion
+        owner = self._lesionIndexAtSeed(previous["seed"]) if previous is not None else None
+        kind = recordlog.selection_change(previous, current, owner, adopted=adopted)
+        self._loggedLesion = current
+        if self.recorder is None:
+            return
+        if kind is not None and self.recorder.segment is not None:
+            fields = self._lesionFields(lesion) if lesion is not None else {}
+            if kind == recordlog.LESION_RENUMBERED:
+                fields["previous_number"] = int(previous["number"])
+            self.recorder.note(kind, **fields)
+        self._updateRecordingBanner(lesion)
+
+    def _updateRecordingBanner(self, lesion=None):
+        # Nothing to draw it on unless a recording is open (and a segment that
+        # opens logs the lesion state, which comes back here)
+        if self.recorder is None or self.recorder.segment is None:
+            return
+        case = self.currentCase()
+        if lesion is not None:
+            fields = self._lesionFields(lesion)
+            fields["type"] = recordlog.LESION_SELECTED
+            text = "{}  voxel ({})".format(
+                recordlog.lesion_text(fields), ", ".join(str(v) for v in fields["seed_ijk"])
+            )
+        elif self._newLesion is not None:
+            text = "Painting a new lesion ({})".format(nameForLabelValue(self._newLesion["label"]))
+        else:
+            text = "No lesion selected"
+        self.recorder.setBanner("case {}".format(case.case_id) if case is not None else "", text)
+
+    def _onRecordingSegment(self):
+        """A recording segment just opened: say where the case stands, then
+        log the lesion on screen as the first one selected."""
+        done, total = self._doneCount()
+        self.recorder.note(
+            "case_state", lesions=total, done=done, unsaved=bool(self.unsavedChanges),
+            mask_file=os.path.basename(self.logic.maskPath) if self.logic.maskPath else None,
+        )
+        self._loggedLesion = None
+        self._noteLesionState()
+        logging.info("GTReview: recording into %s", self.recorder.segment.path(""))
+
+    def _recordingContext(self):
+        """What a segment keeps about the case on screen; None without one."""
+        case = self.currentCase()
+        if case is None or self.logic.segmentationNode is None or not self.batchDirectory:
+            return None
+        try:
+            build = sessionlog.installed_build(__file__)
+        except Exception:  # noqa: BLE001
+            build = "unknown"
+        context = {
+            "case_id": case.case_id,
+            "case_dir": case.directory,
+            "batch_dir": self.batchDirectory,
+            "mask_file": os.path.basename(self.logic.maskPath) if self.logic.maskPath else None,
+            "images": sorted(case.images),
+            "gtreview_build": "source tree" if build is None else build,
+            "slicer": "{} (revision {})".format(slicer.app.applicationVersion, slicer.app.revision),
+            "lesion_numbers": (
+                "rank by size, renumbered on every recount: follow seed_ijk, a voxel "
+                "inside the lesion in the mask's [i, j, k] grid"
+            ),
+        }
+        geometry = self.logic.maskGeometry
+        if geometry is not None:
+            context["mask_geometry"] = {
+                "size": [int(v) for v in geometry.size],
+                "spacing": [float(v) for v in geometry.spacing],
+                "origin": [float(v) for v in geometry.origin],
+                "direction": [float(v) for v in geometry.direction],
+            }
+        return context
+
+    def _selectedMicrophone(self):
+        """``(name, realm, label)`` of the microphone picked; '' is the default."""
+        combo = getattr(self, "microphoneComboBox", None)
+        if combo is None or combo.currentIndex < 0:
+            return "", "", "System default"
+        data = str(combo.itemData(combo.currentIndex) or "\n")
+        name, _, realm = data.partition("\n")
+        return name, realm, str(combo.currentText)
+
+    def _refreshMicrophones(self):
+        combo = self.microphoneComboBox
+        wanted = combo.itemData(combo.currentIndex) if combo.count else None
+        if wanted is None:
+            wanted = slicer.app.userSettings().value(RECORDING_MICROPHONE_KEY, "\n")
+        try:
+            choices = recording.inputDevices()
+        except Exception:  # noqa: BLE001 - no audio system at all
+            logging.warning("GTReview: listing microphones failed", exc_info=True)
+            choices = []
+        previous = self._updatingGui
+        self._updatingGui = True
+        try:
+            combo.clear()
+            combo.addItem("System default", "\n")
+            for choice in choices:
+                combo.addItem(choice["label"], "{}\n{}".format(choice["name"], choice["realm"]))
+                combo.setItemData(combo.count - 1, choice["name"], qt.Qt.ToolTipRole)
+            index = combo.findData(str(wanted))
+            combo.currentIndex = index if index >= 0 else 0
+        finally:
+            self._updatingGui = previous
+        if wanted not in (None, "", "\n") and combo.findData(str(wanted)) < 0:
+            self._setRecordingStatus(
+                "The microphone picked last time is not connected; using the system default."
+            )
+
+    def _refreshVideoSources(self):
+        combo = getattr(self, "videoSourceComboBox", None)
+        if combo is None:
+            return
+        wanted = combo.itemData(combo.currentIndex) if combo.count else None
+        if wanted is None:
+            wanted = slicer.app.userSettings().value(RECORDING_VIDEO_SOURCE_KEY, "")
+        previous = self._updatingGui
+        self._updatingGui = True
+        try:
+            combo.clear()
+            for label, name in recording.viewSources():
+                combo.addItem(label, name)
+            index = combo.findData(str(wanted or ""))
+            combo.currentIndex = index if index >= 0 else 0
+        finally:
+            self._updatingGui = previous
+        if self.recorder is not None and self.recorder.videoOn:
+            source = str(combo.itemData(combo.currentIndex) or "")
+            if source != self.recorder.videoSource:
+                self.recorder.setVideoSource(source)
+
+    @guarded("Looking for microphones")
+    def onRefreshMicrophones(self):
+        self._refreshMicrophones()
+        self._updateRecordingControls()
+
+    @guarded("Choosing a microphone")
+    def onMicrophoneChanged(self, index=None):
+        del index
+        if self._updatingGui:
+            return
+        data = self.microphoneComboBox.itemData(self.microphoneComboBox.currentIndex)
+        settings = slicer.app.userSettings()
+        settings.setValue(RECORDING_MICROPHONE_KEY, str(data or "\n"))
+        settings.sync()
+
+    @guarded("Choosing what the video shows")
+    def onVideoSourceChanged(self, index=None):
+        del index
+        if self._updatingGui:
+            return
+        source = str(self.videoSourceComboBox.itemData(self.videoSourceComboBox.currentIndex) or "")
+        settings = slicer.app.userSettings()
+        settings.setValue(RECORDING_VIDEO_SOURCE_KEY, source)
+        settings.sync()
+        if self.recorder is not None and self.recorder.videoOn:
+            self.recorder.setVideoSource(source)
+
+    @guarded("Recording the microphone")
+    def onRecordAudioToggled(self, checked):
+        if self._updatingGui or self.recorder is None:
+            return
+        if not checked:
+            self.recorder.stopAudio()
+            logging.info("GTReview: microphone recording stopped")
+            return
+        name, realm, label = self._selectedMicrophone()
+        try:
+            self.recorder.startAudio(name, realm, label)
+        except Exception as error:  # noqa: BLE001 - shown, and the button goes back
+            self._updateRecordingControls()
+            raise RuntimeError("The microphone could not be started: {}".format(error))
+        logging.info("GTReview: recording the microphone %s at %d Hz",
+                     self.recorder.mic.label, self.recorder.mic.rate)
+        if IS_MAC:
+            self._setRecordingStatus(
+                "macOS lets Slicer use the microphone only if Slicer itself may; "
+                "GTReview warns if what it gets is pure silence.")
+
+    @guarded("Recording the video")
+    def onRecordVideoToggled(self, checked):
+        if self._updatingGui or self.recorder is None:
+            return
+        if not checked:
+            self.recorder.stopVideo()
+            logging.info("GTReview: video recording stopped")
+            return
+        source = str(self.videoSourceComboBox.itemData(self.videoSourceComboBox.currentIndex) or "")
+        try:
+            self.recorder.startVideo(source)
+        except Exception as error:  # noqa: BLE001
+            self._updateRecordingControls()
+            raise RuntimeError("The video could not be started: {}".format(error))
+        ffmpeg, _h264 = recording.findFfmpeg()
+        logging.info("GTReview: recording video of %s with %s", source or "all views",
+                     ffmpeg or "VTK's Theora writer")
+
+    @guarded("Testing the microphone")
+    def onTestMicrophoneToggled(self, checked):
+        if self._updatingGui or self.recorder is None:
+            return
+        if not checked:
+            self.recorder.stopTest()
+            return
+        name, realm, label = self._selectedMicrophone()
+        try:
+            self.recorder.startTest(name, realm, label)
+        except Exception as error:  # noqa: BLE001
+            self._updateRecordingControls()
+            raise RuntimeError("The microphone could not be opened: {}".format(error))
+
+    @guarded("Getting ffmpeg")
+    def onGetFfmpeg(self):
+        if not slicer.util.confirmYesNoDisplay(
+            "Download ffmpeg from the Python Package Index (the imageio-ffmpeg package, "
+            "about 30 MB)?\n\nWith it the video is MP4 at 10 frames per second and carries "
+            "the narrated audio and a chapter per lesion.  ffmpeg is GPL software; it is "
+            "installed into this Slicer only, not shipped with GTReview.",
+            windowTitle="GTReview",
+        ):
+            return
+        with BusyCursor("GTReview: installing ffmpeg ..."):
+            path = recording.installFfmpeg()
+        if not path:
+            raise RuntimeError("imageio-ffmpeg installed, but no ffmpeg in it runs here.")
+        logging.info("GTReview: ffmpeg for recordings: %s", path)
+        self._updateRecordingControls()
+
+    @guarded("Opening the recordings folder")
+    def onOpenRecordingsFolder(self):
+        folder = self.recorder.lastFolder if self.recorder is not None else None
+        if not folder and self.batchDirectory:
+            folder = os.path.join(self.batchDirectory, recording.RECORDINGS_FOLDER)
+        if not folder or not os.path.isdir(folder):
+            slicer.util.showStatusMessage("GTReview: nothing has been recorded for this batch yet.", 3000)
+            return
+        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+
+    def _setRecordingStatus(self, text, warning=False):
+        label = getattr(self, "recordingStatusLabel", None)
+        if label is None:
+            return
+        label.text = "<font color='#c83c3c'>{}</font>".format(text) if warning else text
+
+    def _onRecorderLevel(self, dbfs):
+        bar = getattr(self, "microphoneLevelBar", None)
+        if bar is not None:
+            bar.value = 0 if dbfs is None else int(max(0.0, min(100.0, (dbfs + 60.0) * 100.0 / 60.0)))
+
+    def _onRecorderTick(self, seconds):
+        self.recordingClockLabel.text = "<font color='#d03030'>&#9679;</font> {}".format(
+            recordlog.format_clock(seconds))
+
+    def _onRecorderWarning(self, text):
+        logging.warning("GTReview: %s", text)
+        self._setRecordingStatus(text, warning=True)
+        self._updateRecordingControls()
+        if slicer.app.testingEnabled() or slicer.util.mainWindow() is None:
+            return
+        slicer.util.warningDisplay(text, windowTitle="GTReview recording")
+
+    def _stopRecording(self, reason):
+        if self.recorder is None or not self.recorder.recording:
+            return
+        self.recorder.stopAll()
+        logging.info("GTReview: recording stopped: %s", reason)
+        slicer.util.showStatusMessage("GTReview: recording stopped ({}).".format(reason), 5000)
+
+    def _updateRecordingControls(self):
+        recorder = self.recorder
+        if recorder is None or self.recordAudioButton is None:
+            return
+        hasCase = (self.currentCase() is not None and self.logic is not None
+                   and self.logic.segmentationNode is not None and bool(self.batchDirectory))
+        for button, on, start, stop in (
+            (self.recordAudioButton, recorder.audioOn, "Record microphone", "Stop microphone"),
+            (self.recordVideoButton, recorder.videoOn, "Record video", "Stop video"),
+        ):
+            self._setChecked(button, on)
+            button.text = stop if on else start
+            button.enabled = hasCase or on
+        self.microphoneComboBox.enabled = not recorder.audioOn and not recorder.testing
+        self._setChecked(self.testMicrophoneButton, recorder.testing)
+        self.testMicrophoneButton.enabled = not recorder.audioOn
+        if not (recorder.audioOn or recorder.testing):
+            self._onRecorderLevel(None)
+        if not recorder.recording:
+            self.recordingClockLabel.text = ""
+        ffmpeg, h264 = recording.findFfmpeg()
+        self.getFfmpegButton.visible = not ffmpeg
+        self.openRecordingsButton.enabled = bool(recorder.lastFolder or self.batchDirectory)
+        if recorder.recording and recorder.segment is not None:
+            self._setRecordingStatus("Recording into {}".format(
+                self._elide(recorder.segment.path(""), 60)))
+        elif not hasCase:
+            self._setRecordingStatus("Load a case to record; recordings are kept per case.")
+        else:
+            video = ("video: {} MP4, {} fps".format("H.264" if h264 else "MPEG-4", recording.VIDEO_FPS)
+                     if ffmpeg else "video: Theora .ogv, {} fps (no ffmpeg found)".format(recording.THEORA_FPS))
+            self._setRecordingStatus("Saved per case under {}/; {}.".format(
+                recording.RECORDINGS_FOLDER, video))
+        self._showRecordingIndicator(recorder.recording)
+
+    def _showRecordingIndicator(self, shown):
+        """A red REC in Slicer's status bar while anything records, whatever
+        module is open."""
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None:
+            return
+        if shown and self._recIndicator is None:
+            label = qt.QLabel("<b><font color='#d02020'>&#9679; REC</font></b>")
+            label.toolTip = "GTReview is recording (see its Recording section)."
+            mainWindow.statusBar().addPermanentWidget(label)
+            self._recIndicator = label
+        elif not shown and self._recIndicator is not None:
+            label, self._recIndicator = self._recIndicator, None
+            try:
+                mainWindow.statusBar().removeWidget(label)
+                label.setParent(None)
+            except Exception:  # noqa: BLE001 - the window is going away
+                pass
 
     # -------------------------------------------------------------- save slots
     def saveCurrentCase(self):
@@ -5136,6 +5728,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         with BusyCursor("GTReview: saving {} ...".format(os.path.basename(path))):
             written = self.logic.saveReviewedMask()
         logging.info("GTReview: saved %s", written)
+        self._recordingNote("saved", detail=os.path.basename(written))
         self.unsavedChanges = False
         slicer.util.showStatusMessage("GTReview: saved {}".format(written), 6000)
         # "reviewed" means exactly "the reviewed file exists": re-derive the

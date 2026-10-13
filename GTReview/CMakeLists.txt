@@ -2,7 +2,8 @@
 set(MODULE_NAME GTReview)
 
 #-----------------------------------------------------------------------------
-# Every script and resource must be listed explicitly -- there is no globbing.
+# Every script and resource must be listed explicitly -- there is no globbing,
+# save for the voice clips at the end of this file.
 #
 # slicerMacroBuildScriptedModule raises FATAL_ERROR at configure time for an
 # entry that does not exist, but a file that exists and is NOT listed here is
@@ -19,9 +20,12 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/layouts.py
   ${MODULE_NAME}Lib/lesions.py
   ${MODULE_NAME}Lib/maskio.py
+  ${MODULE_NAME}Lib/recording.py
+  ${MODULE_NAME}Lib/recordlog.py
   ${MODULE_NAME}Lib/SegmentEditorSphereThresholdEffect.py
   ${MODULE_NAME}Lib/sessionlog.py
   ${MODULE_NAME}Lib/undobudget.py
+  ${MODULE_NAME}Lib/wavfile.py
   )
 
 # Resources/ is shared across all scripted modules in the built tree, so the
@@ -31,6 +35,16 @@ set(MODULE_PYTHON_SCRIPTS
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
   )
+
+# The spoken clips of narrated recordings, 131 of them, are the one place a
+# glob is used: what the folder must hold is GTReviewLib.recordlog.VOICE_CLIPS,
+# and Testing/test_wavfile.py fails on any clip missing from it or extra in it,
+# so the folder itself is the list.  Packaging/make_package.sh copies the
+# folder the same way.
+file(GLOB _voice_clips RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/Resources/${MODULE_NAME}Voice/*.wav)
+list(SORT _voice_clips)
+list(APPEND MODULE_PYTHON_RESOURCES ${_voice_clips})
 
 #-----------------------------------------------------------------------------
 # Do NOT pass WITH_SUBDIR: it nests the destination one directory deeper, which

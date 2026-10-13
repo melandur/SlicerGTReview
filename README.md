@@ -97,6 +97,13 @@ from a share.
 - **A log beside the data** — `GTReview.log` in the loaded batch directory
   records what GTReview did and what went wrong, ready to send with a problem
   report (see *Log file* below).
+- **Recording** — two optional switches, *Record microphone* and *Record
+  video*, on top of the unchanged review. Recordings are kept per case in
+  `GTReview-recordings/` in the batch directory. Every switch to another
+  lesion is logged with a voxel inside the lesion, spoken into a narrated copy
+  of the microphone track ("lesion three"), and shown in a banner on the video
+  of the axial views, so the recording alone tells which lesion was meant (see
+  *Recording* below).
 
 Pure logic — case discovery, connected components, NIfTI geometry-preserving
 read/write — lives in `GTReviewLib/` with **no Slicer imports**, so it is unit
@@ -277,16 +284,21 @@ and resource lookups work in both):
   GTReviewLib/layouts.py
   GTReviewLib/lesions.py
   GTReviewLib/maskio.py
+  GTReviewLib/recording.py
+  GTReviewLib/recordlog.py
   GTReviewLib/SegmentEditorSphereThresholdEffect.py
   GTReviewLib/sessionlog.py
   GTReviewLib/undobudget.py
+  GTReviewLib/wavfile.py
   Resources/Icons/GTReview.png
+  Resources/GTReviewVoice/*.wav        # the spoken clips, 131 of them
 ```
 
 > Every file under `GTReviewLib/` and every resource must be listed explicitly
-> in `GTReview/CMakeLists.txt` — there is no globbing. A file you forget to list
-> is *silently* omitted from the package: it works from the source tree and
-> breaks only after installation.
+> in `GTReview/CMakeLists.txt` — there is no globbing, save for the voice
+> clips, whose folder is pinned to `recordlog.VOICE_CLIPS` by the unit tests.
+> A file you forget to list is *silently* omitted from the package: it works
+> from the source tree and breaks only after installation.
 
 ---
 
@@ -355,7 +367,9 @@ Saving writes:
 
 - **Original files are opened read-only and are never overwritten.** GTReview
   writes only `_reviewed_seg.nii.gz` into a case directory, and its log,
-  `GTReview.log`, into the batch directory (see *Log file*).
+  `GTReview.log`, into the batch directory (see *Log file*); recordings, when
+  made, go into `GTReview-recordings/` in the batch directory (see
+  *Recording*).
 - If `_reviewed_seg.nii.gz` already exists it is loaded as the starting mask, so
   a review can be resumed, and is overwritten on save after a confirmation
   prompt.
@@ -437,6 +451,114 @@ with the data and can be sent as it is when something goes wrong.
 one, and Slicer's own log named in the header. Slicer writes a new log file
 every time it runs, so take the one named in the header of the session where
 the problem happened, the last header above the error, rather than the newest.
+
+---
+
+## Recording
+
+The *Recording* section adds two switches to the review, which otherwise
+works exactly as before. **Record microphone** records the reader talking
+through the case; **Record video** records the axial views. Either, both, or
+neither; while one runs, a red **● REC** sits in Slicer's status bar.
+
+### What the recording says about the lesion
+
+The lesion number in the table is a rank by size and is handed out again on
+every recount, so "lesion 4" at minute three and "lesion 4" at minute ten can
+be two different lesions. Every lesion event is therefore logged with the
+number the reader saw **and a seed voxel inside the lesion** (`seed_ijk`, an
+index into the mask's own `[i, j, k]` grid), the same voxel the panel uses to
+keep the selection and the *Done* ticks across renumbering. The reviewed mask
+keeps the source grid exactly, so a seed finds its lesion again in the
+original mask and in the reviewed one.
+
+The events: a lesion selected, picked again, adopted from *New lesion*,
+renumbered by a recount while selected, deselected or deleted; relabels,
+label deletes, strokes, Undo and Redo, saves, resets, layout and video-source
+changes, and anything lost from the microphone.
+
+### Files
+
+Per case, in `<batch>/GTReview-recordings/<case_id>/`, every file of one
+recording sharing the stem `<case_id>_<YYYYMMDD-HHMMSS>`:
+
+| File | What |
+| --- | --- |
+| `<stem>.wav` | the narrated recording, for listening: a short chime and a spoken "lesion three" wherever the reader moved to another lesion ("new lesion four" for one just painted, "now lesion two" when a recount renumbered the one selected). The reader's voice is turned down under the announcement, never cut. Paging quickly through the list announces only the lesion stopped on. |
+| `<stem>_mic.wav` | the microphone as captured, untouched, for transcription. Written as it arrives, with its header kept current, so a crash leaves a playable file. |
+| `<stem>.srt` | the active lesion as subtitles: VLC and mpv show them under the audio or the video. |
+| `<stem>_labels.txt` | the same as an Audacity label track (*File › Import › Labels*). |
+| `<stem>.mp4` | the video with ffmpeg: H.264 at 10 frames a second, the narrated audio, and one chapter per lesion. |
+| `<stem>.ogv` | the video without ffmpeg: Theora at 5 frames a second, from VTK's own encoder (VLC and mpv play it). |
+| `<stem>.json` | every event in order with its time, the lesion's number, label, size, seed voxel (IJK and RAS) and bounding box, plus the case, the mask, its geometry, the reader's login, and where each media file starts on the recording's clock. |
+
+Both WAV files also carry a cue point per lesion change (ffmpeg and mpv show
+them as chapters). Moving to another case closes the files of the one left
+and starts the next case's, without a gap. When the batch folder cannot be
+written, recordings go to `~/GTReview-recordings/<batch name>/` instead.
+
+### Video
+
+The video shows the view area as laid out (*All views*: every sequence side by
+side in *Sequences (axial)*), or one slice view with its slider bar, chosen in
+the *Video* box and changeable while recording. A banner above the views names
+the case and the active lesion with its number, label, size and seed voxel.
+
+The picture is rendered from Slicer's own views, not read off the screen, so
+no screen-recording permission is involved, and windows on top of Slicer, a
+second monitor or Wayland make no difference. When Slicer is busy (a case
+loading, a recount) the last picture repeats, so the video always runs as long
+as the clock did and stays in step with the audio and the events.
+
+ffmpeg is looked for where Slicer's Screen Capture module keeps it (the same
+setting), then in the `imageio-ffmpeg` Python package, then on the `PATH`.
+*Get ffmpeg…* installs `imageio-ffmpeg` from PyPI into Slicer (about 30 MB)
+after asking. ffmpeg is GPL software; GTReview does not ship it.
+
+### Microphone
+
+Pick the input in *Microphone* (*System default* follows the system), press
+the refresh button after plugging one in, and *Test* it: the level bar should
+move while you speak. The choice is remembered.
+
+Capture goes through Qt Multimedia, which Slicer ships, and its audio moves on
+Slicer's main thread: while Slicer is busy the sound system holds the samples.
+PulseAudio and PipeWire hold minutes on their own (measured: nothing lost
+through a two-second freeze); on Windows GTReview asks WinMM for ten seconds.
+What a system drops anyway (CoreAudio, or plain ALSA without a sound server,
+hold well under a second) is padded with silence once the shortfall settles,
+so the rest of the recording stays in step, and logged as `audio_gap`.
+
+A microphone picked by name that is unplugged mid-recording stops the
+microphone recording with a warning; what it recorded is kept. Left alone,
+PulseAudio and PipeWire would move the recording to the default input without
+a word, and the narration would carry on from another microphone. With
+*System default* picked, the recording follows the default instead. A
+microphone that stops delivering anything is stopped the same way.
+
+- **macOS.** Slicer as downloaded carries neither the microphone usage
+  description nor the audio-input entitlement macOS requires of a signed app,
+  so macOS hands it silence without asking. GTReview warns after a few seconds
+  of pure silence. Video works.
+- **Windows.** Desktop apps must be allowed the microphone under *Settings ›
+  Privacy › Microphone*; a muted or blocked microphone is reported the same
+  way.
+
+### The voice
+
+The announcements are strung together from the clips in
+`GTReview/Resources/GTReviewVoice/`: the whole phrase for "lesion 1" to
+"lesion 99", and single words for the rest. They were synthesised with Piper
+TTS and its LJSpeech voice, trained on public-domain recordings, and checked
+with a speech recogniser: `Packaging/make_voice_clips.py` makes them again.
+To use a human voice, record WAVs under the same names; a phrase that is
+missing is spoken word by word.
+
+### Privacy
+
+A voice recording is personal data, and the video shows the scans. Keep
+recordings wherever the batch itself may be kept, and agree on recording with
+whoever is recorded. Nothing is sent anywhere.
 
 ---
 
@@ -524,6 +646,22 @@ It needs the module on the path, and is named without a `test_` prefix so the
 $SLICER/Slicer --no-splash \
     --additional-module-path $GTREVIEW/GTReview \
     --python-script $GTREVIEW/Testing/integration_gtreview.py
+```
+
+The recording has an integration test of its own. It opens no microphone: a
+stand-in delivers a hum at the clock's pace, and can hold audio through a
+freeze and deliver it late, or drop it. It records the views for real while
+lesions are selected, deleted and renumbered by Undo, through two freezes and
+a case switch. It then checks every file: cue points, an announcement per
+lesion settled on, seed voxels inside the lesions they name, audio and video
+as long as the clock ran, chapters, the banner, the Theora fallback, a
+microphone that fails to open and one that gives only silence. On a machine
+without a display, `xvfb-run -a` in front of it works:
+
+```bash
+$SLICER/Slicer --no-splash \
+    --additional-module-path $GTREVIEW/GTReview \
+    --python-script $GTREVIEW/Testing/integration_recording.py
 ```
 
 The in-application self test (`GTReviewTest`) is reachable from the module's

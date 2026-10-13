@@ -200,6 +200,12 @@ done < <(cd "$MODULE_DIR" && find . -name '*.py' -not -path './__pycache__/*' \
 [ "$missing" -eq 0 ] || exit 1
 
 RESOURCES=(Resources/Icons/"$EXTENSION_NAME".png)
+# The spoken clips of narrated recordings: the whole folder, as the module
+# CMakeLists globs it (Testing/test_wavfile.py pins its content).
+mapfile -t VOICE < <(cd "$MODULE_DIR" && find "Resources/${EXTENSION_NAME}Voice" -name '*.wav' | sort)
+[ "${#VOICE[@]}" -gt 100 ] ||
+    { echo "error: Resources/${EXTENSION_NAME}Voice holds only ${#VOICE[@]} voice clips" >&2; exit 1; }
+RESOURCES+=("${VOICE[@]}")
 
 # ---------------------------------------------------------------------------
 # Assemble.  INNER is what the manager copies into place; on macOS it is buried
