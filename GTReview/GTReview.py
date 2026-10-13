@@ -1906,6 +1906,11 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # vertical policy, so any spare height in the section opened up as a
         # band of nothing between the tools and their settings.
         self.editor.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
+        # Everything the editor shows now lives outside it or is hidden, but its
+        # own size hint (~40 px) still opened a blank band above the tool row
+        # whenever the panel scrolls -- which, with the Recording section below,
+        # it does at any ordinary window height.
+        self.editor.setMaximumHeight(0)
         editorLayout = self.editor.layout()
         if editorLayout is not None:
             editorLayout.setContentsMargins(0, 0, 0, 0)
