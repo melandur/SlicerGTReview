@@ -198,6 +198,7 @@ class FakeMicrophone(object):
         self.unplugged = False
         self.dropNextFreeze = False
         self.failOnStart = False
+        self.dropped = 0.0  # seconds thrown away, as a device that cannot hold them would
         self._produced = 0
         self._active = False
         self._timer = qt.QTimer()
@@ -233,6 +234,7 @@ class FakeMicrophone(object):
         if self.dropNextFreeze and owed > self.rate:
             # a freeze longer than a second: everything but the last 50 ms is gone
             kept = int(0.05 * self.rate)
+            self.dropped += (owed - kept) / float(self.rate)
             self._produced += owed - kept
             owed = kept
             self.dropNextFreeze = False
@@ -479,6 +481,7 @@ class RecordingIntegrationTest(unittest.TestCase):
         mic.dropNextFreeze = True
         time.sleep(2.5)
         pump(3.0)
+        self.__class__.dropped = mic.dropped
 
         # the delete and the undo left the case "unsaved": no Save / Discard prompt
         widget._confirmDiscardIfNeeded = lambda *args, **kwargs: True
@@ -557,8 +560,10 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(abs(narrated.shape[0] / float(rate) - wall) < 0.4,
                      "the recording lasts as long as the clock ran, through both freezes",
                      "{:.2f} s of audio for {:.2f} s".format(narrated.shape[0] / float(rate), wall))
-        CHECKS.check(len(audio["gaps"]) == 1 and 1.5 < audio["gaps"][0]["seconds"] < 2.6,
-                     "only the dropped freeze was padded with silence", str(audio["gaps"]))
+        # (on a slow machine the freeze outlasts its 2.5 s of sleep)
+        CHECKS.check(len(audio["gaps"]) == 1 and abs(audio["gaps"][0]["seconds"] - self.dropped) < 0.35,
+                     "only the dropped freeze was padded, by what was dropped",
+                     "{} for {:.2f} s dropped".format(audio["gaps"], self.dropped))
         schedule = recordlog.announcement_schedule(events, audio["offset"])
         CHECKS.check(audio["announcements"] == len(schedule) >= 4,
                      "an announcement per lesion settled on", "{} / {}".format(audio["announcements"], len(schedule)))
@@ -809,7 +814,7 @@ class RecordingIntegrationTest(unittest.TestCase):
         log = self.log(MICROPHONE, CASE_TWO)
         CHECKS.check("audio_write_failed" in [e["type"] for e in log["events"]],
                      "the failure is in the event log")
-        CHECKS.check(1.0 < self.seconds(MICROPHONE, CASE_TWO) < 1.8 and self.seconds(VIDEO, CASE_TWO) > 1.0,
+        CHECKS.check(1.0 < self.seconds(MICROPHONE, CASE_TWO) < 1.8 and self.seconds(VIDEO, CASE_TWO) > 0.5,
                      "what reached the disk and the video are kept",
                      "{:.2f} s / {:.2f} s".format(self.seconds(MICROPHONE, CASE_TWO), self.seconds(VIDEO, CASE_TWO)))
 

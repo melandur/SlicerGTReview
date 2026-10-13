@@ -129,6 +129,19 @@ jobs:
           $player.Stop()
           Get-Content $env:PROBE_REPORT
 
+      - name: Whether anything can record from it here, ffmpeg through DirectShow (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          ffmpeg -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Select-String -Pattern "audio|CABLE"
+          $player = New-Object System.Media.SoundPlayer "$env:RUNNER_TEMP\tone.wav"
+          $player.PlayLooping()
+          ffmpeg -hide_banner -y -f dshow -i "audio=CABLE Output (VB-Audio Virtual Cable)" -t 3 "$env:RUNNER_TEMP\dshow.wav" 2>&1 | Select-Object -Last 12
+          $player.Stop()
+          ffmpeg -hide_banner -i "$env:RUNNER_TEMP\dshow.wav" -af volumedetect -f null - 2>&1 | Select-String -Pattern "mean_volume|max_volume"
+
       - name: The same with "Let desktop apps access your microphone" on (Windows)
         if: runner.os == 'Windows'
         continue-on-error: true
@@ -214,10 +227,8 @@ jobs:
           ls -d "$RUNNER_TEMP"/Slicer.app/Contents/*.* || true
           bash GTReview/Resources/GTReviewMacMicrophone.sh "$RUNNER_TEMP/Slicer.app"
           ls -d "$RUNNER_TEMP"/Slicer.app/Contents/*.* || true
-          for code in "$RUNNER_TEMP/Slicer.app" "$RUNNER_TEMP/Slicer.app/Contents/bin/SlicerApp-real"; do
-            echo "== $code"; codesign -dv "$code" 2>&1 | grep -E "flags|Signature"
-            codesign -d --entitlements :- "$code" 2>/dev/null | plutil -p - || true
-          done
+          codesign -dv "$RUNNER_TEMP/Slicer.app" 2>&1 | grep -E "Executable|flags|Signature" || true
+          codesign -d --entitlements :- "$RUNNER_TEMP/Slicer.app" 2>/dev/null | plutil -p - || true
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$RUNNER_TEMP/Slicer.app/Contents/Info.plist"
           codesign --verify --verbose=2 "$RUNNER_TEMP/Slicer.app" || echo "(the app's seal does not verify)"
 

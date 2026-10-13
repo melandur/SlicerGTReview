@@ -97,7 +97,9 @@ sign() {
 }
 
 echo "Slicer:      $APP"
-# SlicerApp-real is the process that opens the microphone ...
+# The app's own executable (Contents/MacOS/Slicer) is what opens the
+# microphone in the official builds; a build with a separate SlicerApp-real
+# has that signed too ...
 if [[ -f "$APP/Contents/bin/SlicerApp-real" ]]; then
     sign "$APP/Contents/bin/SlicerApp-real"
     echo "signed:      Contents/bin/SlicerApp-real"

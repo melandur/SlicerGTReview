@@ -43,23 +43,26 @@ def loudness(data, rate, channels):
     return out
 
 
-def qtWarnings(last=15):
-    """The newest entries of Slicer's error log: where Qt says why."""
+def qtWarnings():
+    """What Slicer's error log holds about audio: where Qt says why."""
     model = slicer.app.errorLogModel()
-    rows = model.rowCount()
-    return [" | ".join(str(model.index(row, column).data()) for column in range(model.columnCount()))
-            for row in range(max(0, rows - last), rows)]
+    entries = [" | ".join(str(model.index(row, column).data()) for column in range(model.columnCount()))
+               for row in range(model.rowCount())]
+    return [entry for entry in entries if "audio" in entry.lower()][-15:]
 
 
-def raw(info):
-    """Open *info* in its own preferred format with plain Qt, for comparison."""
+def raw(info, sixteen):
+    """Open *info* with plain Qt, for comparison: in its own preferred format,
+    or that format at 16 bits."""
     fmt = info.preferredFormat()
     entry = {"name": info.deviceName(), "realm": info.realm(),
              "format": [fmt.sampleRate(), fmt.channelCount(), fmt.sampleSize(), fmt.codec(), int(fmt.sampleType())]}
-    if fmt.sampleSize() != 16 or fmt.sampleType() != qt.QAudioFormat.SignedInt:
+    if sixteen:
         fmt.setSampleSize(16)
         fmt.setSampleType(qt.QAudioFormat.SignedInt)
         entry["format_used"] = [fmt.sampleRate(), fmt.channelCount(), 16]
+    if fmt.sampleSize() != 16:
+        entry["note"] = "not 16-bit: only whether it opens is told"
     audio = qt.QAudioInput(info, fmt)
     io = audio.start()
     entry["open_error"] = int(audio.error())
@@ -70,7 +73,10 @@ def raw(info):
             slicer.app.processEvents()
             chunks.append(io.readAll().data())
             time.sleep(0.01)
-        entry.update(loudness(b"".join(chunks), fmt.sampleRate(), fmt.channelCount()))
+        if fmt.sampleSize() == 16:
+            entry.update(loudness(b"".join(chunks), fmt.sampleRate(), fmt.channelCount()))
+        else:
+            entry["bytes"] = len(b"".join(chunks))
     audio.stop()
     return entry
 
@@ -93,8 +99,9 @@ try:
     except Exception as error:  # noqa: BLE001 - reported, then the raw tries below
         report["gtreview_error"] = str(error)
         report["qt_warnings"] = qtWarnings()
-        report["raw"] = [raw(info) for info in qt.QAudioDeviceInfo.availableDevices(qt.QAudio.AudioInput)
-                         if wanted in info.deviceName().lower()]
+        report["raw"] = [raw(info, sixteen) for info in qt.QAudioDeviceInfo.availableDevices(qt.QAudio.AudioInput)
+                         if wanted in info.deviceName().lower() for sixteen in (False, True)]
+        report["qt_warnings_after"] = qtWarnings()
     else:
         report.update(device=microphone.label, rate=microphone.rate, channels=microphone.channels)
         pump(SECONDS)
