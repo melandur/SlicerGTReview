@@ -92,6 +92,21 @@ class WavWriterTest(unittest.TestCase):
         rate, back = wavfile.read_wav(self.path)
         self.assertEqual(back.shape, (100, 1))
 
+    def test_closed_even_when_the_last_update_fails(self):
+        writer = wavfile.WavWriter(self.path, 1000)
+        writer.write(np.ones(10, dtype=np.int16).tobytes())
+        handle = writer._handle
+
+        def full_disk():
+            raise OSError(28, "No space left on device")
+
+        writer.flush = full_disk
+        with self.assertRaises(OSError):
+            writer.close()
+        self.assertTrue(writer.closed)
+        self.assertTrue(handle.closed)
+        writer.close()  # a second close is harmless
+
     def test_not_a_wav(self):
         with open(self.path, "wb") as handle:
             handle.write(b"hello world, not audio")
@@ -124,6 +139,29 @@ class CuePointTest(unittest.TestCase):
         with open(self.path, "rb") as handle:
             blob = handle.read()
         self.assertEqual(struct.unpack("<I", blob[4:8])[0], len(blob) - 8)
+
+    def test_appended_in_place_without_rewriting_the_audio(self):
+        with open(self.path, "rb") as handle:
+            before = handle.read()
+        wavfile.append_cue_points(self.path, [(1.0, "one"), (2.0, "two")])
+        with open(self.path, "rb") as handle:
+            after = handle.read()
+        # everything but the RIFF size is the same bytes, then the new chunks
+        self.assertEqual(after[:4], before[:4])
+        self.assertEqual(after[8:len(before)], before[8:])
+        self.assertEqual(struct.unpack("<I", after[4:8])[0], len(after) - 8)
+
+    def test_an_odd_length_file_gets_its_pad_byte(self):
+        odd = os.path.join(self.tmp, "odd.wav")
+        with open(self.path, "rb") as handle:
+            blob = handle.read()
+        with open(odd, "wb") as handle:  # a stray odd-sized chunk after the data
+            handle.write(blob[:4] + struct.pack("<I", len(blob) - 8 + 11) + blob[8:]
+                         + b"junk" + struct.pack("<I", 3) + b"abc")
+        wavfile.append_cue_points(odd, [(0.5, "half")])
+        self.assertEqual(wavfile.read_cue_points(odd), [(8000, "half")])
+        with wave.open(odd, "rb") as handle:
+            self.assertEqual(handle.getnframes(), 64000)
 
     def test_no_points_leaves_the_file_alone(self):
         before = os.path.getsize(self.path)

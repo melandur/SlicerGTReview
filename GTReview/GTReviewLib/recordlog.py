@@ -323,9 +323,32 @@ def ffmetadata(intervals: Sequence[Tuple[float, float, str]], offset: float,
     return "\n".join(lines) + "\n"
 
 
+def _state_at_start(events: Sequence[Dict], offset: float) -> Optional[Dict]:
+    """The lesion already selected when a file starting at *offset* begins, as
+    a selection at its first moment; None when none was.
+
+    Pressing Record with a lesion selected logs that lesion a moment before
+    the microphone opens; without this it would be neither spoken nor marked.
+    """
+    last = None
+    for event in events:
+        if event.get("type") in LESION_STATE_EVENTS and float(event["t"]) < float(offset):
+            last = event
+    if last is None or last.get("type") == LESION_CLEARED or last.get("number") is None:
+        return None
+    carried = dict(last)
+    carried.update(t=float(offset), type=LESION_SELECTED)
+    carried.pop("previous_number", None)
+    return carried
+
+
 def cue_marks(events: Sequence[Dict], offset: float = 0.0) -> List[Tuple[float, str]]:
-    """``(seconds, text)`` WAV cue points: one per lesion state change."""
+    """``(seconds, text)`` WAV cue points: one per lesion state change, and one
+    at the start for a lesion already selected then."""
     out = []
+    carried = _state_at_start(events, offset)
+    if carried is not None:
+        out.append((0.0, lesion_text(carried)))
     for event in events:
         if event.get("type") in LESION_STATE_EVENTS:
             at = float(event["t"]) - offset
@@ -343,7 +366,11 @@ def announcement_schedule(events: Sequence[Dict], offset: float = 0.0,
     the screen.  An announcement whose next announceable event follows within
     *settle* seconds is skipped -- only where the reader stops is spoken.
     """
-    spoken = [e for e in events if e.get("type") in ANNOUNCED_EVENTS and e.get("number") is not None]
+    spoken = [e for e in events if e.get("type") in ANNOUNCED_EVENTS and e.get("number") is not None
+              and float(e["t"]) >= float(offset)]
+    carried = _state_at_start(events, offset)
+    if carried is not None:
+        spoken.insert(0, carried)
     out = []
     for index, event in enumerate(spoken):
         if index + 1 < len(spoken) and float(spoken[index + 1]["t"]) - float(event["t"]) < settle:

@@ -2341,7 +2341,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def onSceneStartClose(self, caller=None, event=None):
         del caller, event
-        self._stopRecording("the scene is closing")
+        try:
+            self._stopRecording("the scene is closing")
+        except Exception:  # noqa: BLE001 - the save offer below must still come
+            logging.exception("GTReview: stopping the recording before the scene closes failed")
         self._cancelNewLesion()
         self.clearLesionHighlight()
         self._unobserveSegmentEditorNode()
@@ -3021,7 +3024,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.recorder.caseChanged()
         except Exception:  # noqa: BLE001 - a recording must never block a case
             logging.exception("GTReview: switching the recording to the new case failed")
-            self.recorder.stopAll()
+            try:
+                self.recorder.stopAll()
+            except Exception:  # noqa: BLE001
+                logging.exception("GTReview: stopping the recording failed")
         self._updateRecordingBanner(None)
         self._updateRecordingControls()
 
@@ -4984,7 +4990,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._selectRowForLesionIndex(chosen.index)
         self._selectSegmentForLabel(chosen.label)
         self._updateEditingControls()
-        self._noteLesionState(adopted=True)
+        # a stroke that merged into a lesion it touched made nothing new
+        self._noteLesionState(adopted=not merged)
         logging.info(
             "GTReview: new lesion %d adopted as %s%s",
             chosen.index, nameForLabelValue(int(chosen.label)),

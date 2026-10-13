@@ -123,11 +123,16 @@ class WavWriter:
         self._since_patch = 0
 
     def close(self) -> None:
+        """Bring the header up to date and close; closed even when that fails
+        (a full disk, a share gone), so a stop never has to close it twice."""
         if self._handle is None:
             return
-        self.flush()
-        self._handle.close()
-        self._handle = None
+        handle = self._handle
+        try:
+            self.flush()
+        finally:
+            self._handle = None
+            handle.close()
 
 
 def _chunks(blob: bytes):
@@ -208,16 +213,27 @@ def append_cue_points(path: str, marks: Sequence[Tuple[float, str]]) -> int:
 
     *marks* are ``(seconds, text)``; points past the end of the audio are
     dropped.  Returns the number of points written.
+
+    The chunks are appended in place and the RIFF size patched last: the file
+    is the only copy of a recording, and rewriting it whole would leave it
+    truncated if the write failed half way.
     """
-    with open(path, "rb") as handle:
-        blob = handle.read()
     rate = channels = None
     data_frames = 0
-    for chunk_id, offset, size in _chunks(blob):
-        if chunk_id == b"fmt ":
-            _fmt, channels, rate = struct.unpack("<HHI", blob[offset:offset + 8])
-        elif chunk_id == b"data":
-            data_frames = min(size, len(blob) - offset) // (channels * SAMPLE_WIDTH)
+    with open(path, "rb") as handle:
+        if handle.read(12)[8:12] != b"WAVE":
+            raise ValueError("{} is not a WAV file".format(path))
+        length = handle.seek(0, os.SEEK_END)
+        position = 12
+        while position + 8 <= length:
+            handle.seek(position)
+            head = handle.read(16)
+            chunk_id, size = head[:4], struct.unpack("<I", head[4:8])[0]
+            if chunk_id == b"fmt ":
+                _fmt, channels, rate = struct.unpack("<HHI", head[8:16])
+            elif chunk_id == b"data" and channels:
+                data_frames = min(size, length - position - 8) // (channels * SAMPLE_WIDTH)
+            position += 8 + size + (size & 1)
     if rate is None:
         raise ValueError("{} has no fmt chunk".format(path))
     points = []
@@ -235,11 +251,14 @@ def append_cue_points(path: str, marks: Sequence[Tuple[float, str]]) -> int:
         labels += b"labl" + struct.pack("<I", len(body)) + body + (b"\x00" if len(body) & 1 else b"")
     extra = b"cue " + struct.pack("<I", len(cue)) + cue
     extra += b"LIST" + struct.pack("<I", 4 + len(labels)) + b"adtl" + labels
-    if len(blob) & 1:
-        blob += b"\x00"
-    blob = blob[:4] + struct.pack("<I", len(blob) - 8 + len(extra)) + blob[8:] + extra
-    with open(path, "wb") as handle:
-        handle.write(blob)
+    if length & 1:
+        extra = b"\x00" + extra  # chunks start on an even offset
+    with open(path, "r+b") as handle:
+        handle.seek(length)
+        handle.write(extra)
+        handle.flush()
+        handle.seek(4)
+        handle.write(struct.pack("<I", length + len(extra) - 8))
     return len(points)
 
 

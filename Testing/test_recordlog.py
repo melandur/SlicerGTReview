@@ -245,8 +245,28 @@ class SidecarTest(unittest.TestCase):
         schedule = recordlog.announcement_schedule(burst)
         self.assertEqual([c for _, c, _ in schedule], [["lesion-5"], ["lesion-9"]])
 
-    def test_events_before_the_file_starts_are_not_announced(self):
-        self.assertEqual(recordlog.announcement_schedule([lesionEvent(1.0)], offset=2.0), [])
+    def test_a_lesion_selected_before_the_file_starts_is_announced_at_its_start(self):
+        # Record pressed with lesion 3 selected: logged a moment before the
+        # microphone opened
+        events = [lesionEvent(0.0001, number=3), lesionEvent(5.0, number=4)]
+        schedule = recordlog.announcement_schedule(events, offset=0.0005)
+        self.assertEqual([(round(t, 3), c) for t, c, _ in schedule],
+                         [(0.0, ["lesion-3"]), (5.0, ["lesion-4"])])
+        marks = recordlog.cue_marks(events, offset=0.0005)
+        self.assertEqual([round(t, 3) for t, _ in marks], [0.0, 5.0])
+
+    def test_only_the_state_at_the_start_is_carried(self):
+        events = [lesionEvent(1.0, number=2), lesionEvent(1.5, kind=LESION_RENUMBERED, number=1,
+                                                         previous_number=2)]
+        schedule = recordlog.announcement_schedule(events, offset=3.0)
+        # said plainly at the start: "lesion one", not "now lesion one"
+        self.assertEqual([(t, c) for t, c, _ in schedule], [(0.0, ["lesion-1"])])
+        self.assertNotIn("was #", recordlog.cue_marks(events, offset=3.0)[0][1])
+
+    def test_nothing_is_carried_after_the_selection_was_dropped(self):
+        events = [lesionEvent(1.0), lesionEvent(2.0, kind=LESION_CLEARED)]
+        self.assertEqual(recordlog.announcement_schedule(events, offset=3.0), [])
+        self.assertEqual(recordlog.cue_marks(events, offset=3.0), [])
 
 
 class FileNameTest(unittest.TestCase):

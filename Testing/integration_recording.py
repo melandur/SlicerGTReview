@@ -507,7 +507,9 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(log["case_id"] == CASE_TWO, "it is the second case's")
         sources = [e.get("source") for e in log["events"] if e["type"] == "video_source"]
         CHECKS.check(sources == ["t1c"], "the switch to the t1c view is logged", str(sources))
-        CHECKS.check(log["audio"]["offset"] == 0.0, "its audio starts with the segment")
+        CHECKS.check(-0.3 < log["audio"]["offset"] <= 0.0,
+                     "its audio starts with the segment, give or take what was still in flight",
+                     str(log["audio"]["offset"]))
         CHECKS.check(any(e["type"] == recordlog.LESION_SELECTED for e in log["events"]),
                      "its lesion selection is logged")
 
@@ -608,6 +610,98 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(waitForFiles(widget), "finished")
         CHECKS.check(any("pure silence" in w for w in self.warnings), "the reader is warned",
                      str(self.warnings))
+
+    def test_08_high_dpi_grabs_fill_the_frame(self):
+        CHECKS.step("A grab from a high-DPI screen fills the frame")
+        image = qt.QImage(400, 300, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(255, 0, 0))
+        image.setDevicePixelRatio(2.0)            # what a Retina screen hands back
+        canvas = recording.composeFrame(image, (400, 300 + recording.BANNER_HEIGHT), "REC", "case", "lesion")
+        corner = qt.QColor(canvas.pixel(395, 300 + recording.BANNER_HEIGHT - 5))
+        CHECKS.check(corner.red() > 200 and corner.green() < 50,
+                     "the far corner of the picture is the picture, not black",
+                     str((corner.red(), corner.green(), corner.blue())))
+
+    def test_09_a_lesion_selected_before_recording_is_announced(self):
+        CHECKS.step("Record pressed with a lesion selected: it is announced at the start")
+        widget = self.widget
+        self.selectLesion(1)
+        pump(0.3)
+        self.fake()
+        widget.recordAudioButton.click()
+        pump(2.5)
+        stem = widget.recorder.segment.path("")
+        widget.recordAudioButton.click()
+        CHECKS.check(waitForFiles(widget), "finished")
+        with open(stem + ".json", encoding="utf-8") as handle:
+            log = json.load(handle)
+        CHECKS.check(log["audio"]["announcements"] == 1, "one announcement", str(log["audio"]))
+        cues = wavfile.read_cue_points(stem + "_mic.wav")
+        CHECKS.check(cues and cues[0][0] == 0 and cues[0][1].startswith("Lesion #1"),
+                     "and a cue point at the very start", str(cues))
+        rate, mic = wavfile.read_wav(stem + "_mic.wav")
+        _rate, narrated = wavfile.read_wav(stem + ".wav")
+        CHECKS.check(not np.array_equal(narrated[: int(0.8 * rate)], mic[: int(0.8 * rate)]),
+                     "spoken into the first second")
+
+    def test_10_a_disk_that_fails_mid_recording(self):
+        CHECKS.step("The microphone file cannot be written: the microphone stops, the rest goes on")
+        widget = self.widget
+        self.fake()
+        self.warnings[:] = []
+        widget.recordAudioButton.click()
+        widget.recordVideoButton.click()
+        pump(1.2)
+        segment = widget.recorder.segment
+        stem = segment.path("")
+
+        def fullDisk(data):
+            raise OSError(28, "No space left on device")
+
+        segment.wav.write = fullDisk
+        pump(1.0)
+        CHECKS.check(not widget.recorder.audioOn and not widget.recordAudioButton.checked,
+                     "the microphone recording stopped")
+        CHECKS.check(widget.recorder.videoOn and widget._recIndicator is not None,
+                     "the video goes on, REC still showing")
+        CHECKS.check(any("could not be written" in w for w in self.warnings), "the reader is told",
+                     str(self.warnings))
+        pump(0.8)
+        widget.recordVideoButton.click()
+        CHECKS.check(waitForFiles(widget), "finished")
+        with open(stem + ".json", encoding="utf-8") as handle:
+            log = json.load(handle)
+        CHECKS.check("audio_write_failed" in [e["type"] for e in log["events"]],
+                     "the failure is in the event log")
+        CHECKS.check(os.path.isfile(stem + "_mic.wav") and log.get("video", {}).get("file"),
+                     "what reached the disk and the video are kept", str(log.get("files")))
+
+    def test_11_frames_owed_for_a_freeze_show_the_old_picture(self):
+        CHECKS.step("After a freeze, the frames it owes repeat the picture from before it")
+        widget = self.widget
+        widget.recordVideoButton.click()
+        pump(1.0)
+        writer = widget.recorder.segment.writer
+        pushes = []
+        original = writer.push
+
+        def spy(frame, repeat=1):
+            pushes.append((frame, repeat))
+            original(frame, repeat)
+
+        writer.push = spy
+        pump(0.5)
+        before = pushes[-1][0]
+        time.sleep(1.5)                           # Slicer frozen
+        pump(0.3)
+        widget.recordVideoButton.click()
+        CHECKS.check(waitForFiles(widget), "finished")
+        burst = [i for i, (_frame, repeat) in enumerate(pushes) if repeat >= 10]
+        CHECKS.check(len(burst) == 1, "one burst of repeats after the freeze", str([r for _f, r in pushes]))
+        i = burst[0]
+        CHECKS.check(pushes[i][0] is before, "the burst is the picture from before the freeze")
+        CHECKS.check(i + 1 < len(pushes) and pushes[i + 1][1] == 1 and pushes[i + 1][0] is not before,
+                     "followed by one new picture")
 
 
 def main():

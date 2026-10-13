@@ -486,7 +486,7 @@ recording sharing the stem `<case_id>_<YYYYMMDD-HHMMSS>`:
 | --- | --- |
 | `<stem>.wav` | the narrated recording, for listening: a short chime and a spoken "lesion three" wherever the reader moved to another lesion ("new lesion four" for one just painted, "now lesion two" when a recount renumbered the one selected). The reader's voice is turned down under the announcement, never cut. Paging quickly through the list announces only the lesion stopped on. |
 | `<stem>_mic.wav` | the microphone as captured, untouched, for transcription. Written as it arrives, with its header kept current, so a crash leaves a playable file. |
-| `<stem>.srt` | the active lesion as subtitles: VLC and mpv show them under the audio or the video. |
+| `<stem>.srt` | the active lesion as subtitles, which VLC and mpv load next to the video and the audio: timed to the video when there is one. When the microphone started at another moment than the video, the audio has its own, `<stem>_audio.srt`. |
 | `<stem>_labels.txt` | the same as an Audacity label track (*File › Import › Labels*). |
 | `<stem>.mp4` | the video with ffmpeg: H.264 at 10 frames a second, the narrated audio, and one chapter per lesion. |
 | `<stem>.ogv` | the video without ffmpeg: Theora at 5 frames a second, from VTK's own encoder (VLC and mpv play it). |
@@ -524,7 +524,9 @@ move while you speak. The choice is remembered.
 Capture goes through Qt Multimedia, which Slicer ships, and its audio moves on
 Slicer's main thread: while Slicer is busy the sound system holds the samples.
 PulseAudio and PipeWire hold minutes on their own (measured: nothing lost
-through a two-second freeze); on Windows GTReview asks WinMM for ten seconds.
+through a two-second freeze); on Windows GTReview asks WinMM for five seconds,
+which it hands over a second at a time, so a stop there can lose up to the
+last second.
 What a system drops anyway (CoreAudio, or plain ALSA without a sound server,
 hold well under a second) is padded with silence once the shortfall settles,
 so the rest of the recording stays in step, and logged as `audio_gap`.
@@ -534,7 +536,9 @@ microphone recording with a warning; what it recorded is kept. Left alone,
 PulseAudio and PipeWire would move the recording to the default input without
 a word, and the narration would carry on from another microphone. With
 *System default* picked, the recording follows the default instead. A
-microphone that stops delivering anything is stopped the same way.
+microphone that stops delivering anything is stopped the same way, and so is
+one whose file cannot be written (a full disk, a share gone); the video, if
+any, goes on, and the event log is written whatever else fails.
 
 - **macOS.** Slicer as downloaded carries neither the microphone usage
   description nor the audio-input entitlement macOS requires of a signed app,
