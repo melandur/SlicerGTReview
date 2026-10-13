@@ -577,9 +577,10 @@ event log is written whatever else fails.
   the microphone. Run it again after installing a new Slicer; installing
   Slicer again undoes it. A Slicer started from Terminal is judged by
   Terminal's permission instead, so GTReview lets it try the microphone.
-- **Windows.** Desktop apps must be allowed the microphone under *Settings ›
-  Privacy › Microphone*; a muted or blocked microphone is reported the same
-  way.
+- **Windows.** Desktop apps must be allowed the microphone, under *Settings ›
+  Privacy & security › Microphone › Let desktop apps access your microphone*.
+  Switched off, the microphone cannot be opened at all, and GTReview says
+  where to switch it on; a muted microphone is reported as pure silence.
 
 ### The voice
 

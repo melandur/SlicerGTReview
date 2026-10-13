@@ -411,8 +411,13 @@ class MicrophoneInput:
         io = audio.start()
         if io is None or audio.error() != qt.QAudio.NoError:
             audio.stop()
-            raise RuntimeError("{} could not be opened (Qt audio error {}).".format(
-                label or info.deviceName(), int(audio.error())))
+            # what kept a virtual microphone shut on Windows until it was
+            # switched on, in either of Qt's back ends (measured)
+            hint = ("  Windows may keep desktop apps from the microphone: Settings > Privacy & "
+                    "security > Microphone > Let desktop apps access your microphone."
+                    if sys.platform == "win32" else "")
+            raise RuntimeError("{} could not be opened (Qt audio error {}).{}".format(
+                label or info.deviceName(), int(audio.error()), hint))
         io.connect("readyRead()", self._onReadyRead)
         self._audio, self._io = audio, io
         self.rate, self.channels = int(fmt.sampleRate()), int(fmt.channelCount())

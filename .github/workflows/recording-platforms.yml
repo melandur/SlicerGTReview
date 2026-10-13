@@ -185,7 +185,12 @@ jobs:
               w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(rate * 180)))
           "
           cat > "$RUNNER_TEMP/probe.sh" <<'PROBE'
-          # $1: "shell" (Slicer started from here) or "open" (as the Dock does)
+          # $1: "shell" (Slicer started from here) or "open" (as the Dock does).
+          # Waits up to two minutes for the report: a prompt nobody answers
+          # keeps Slicer waiting, and the privacy log says so either way.
+          stop_slicer() { pkill -f "$RUNNER_TEMP/Slicer.app/Contents/MacOS/Slicer" 2> /dev/null || true; sleep 2; }
+          stop_slicer
+          rm -f "$PROBE_REPORT"
           afplay "$RUNNER_TEMP/tone.wav" &
           tone=$!
           sleep 1
@@ -194,15 +199,18 @@ jobs:
                      --additional-module-path "$GITHUB_WORKSPACE/GTReview"
                      --python-script "$GITHUB_WORKSPACE/.github/scripts/microphone_probe.py")
           if [[ "$1" == open ]]; then
-            open -W -n -a "$RUNNER_TEMP/Slicer.app" --env PROBE_REPORT="$PROBE_REPORT" --env PROBE_DEVICE=blackhole --args "${arguments[@]}" || true
+            open -n -a "$RUNNER_TEMP/Slicer.app" --env PROBE_REPORT="$PROBE_REPORT" --env PROBE_DEVICE=blackhole --args "${arguments[@]}" || true
           else
-            PROBE_DEVICE=blackhole "$SLICER" "${arguments[@]}" || true
+            PROBE_DEVICE=blackhole "$SLICER" "${arguments[@]}" > /dev/null 2>&1 &
           fi
+          for _ in $(seq 60); do [[ -s "$PROBE_REPORT" ]] && break; sleep 2; done
+          stop_slicer
           kill $tone 2> /dev/null || true
-          cat "$PROBE_REPORT" || echo "no report: Slicer did not get to write one"
+          cat "$PROBE_REPORT" 2> /dev/null || echo "no report within two minutes: Slicer was kept waiting"
+          echo
           echo "-- what macOS's privacy service decided"
-          sudo log show --start "$since" --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS[c] "Microphone"' --style compact 2> /dev/null | tail -25 || true
-          ls -t ~/Library/Logs/DiagnosticReports 2> /dev/null | head -3 || true
+          sudo log show --start "$since" --predicate 'subsystem == "com.apple.TCC"' --style compact 2> /dev/null |
+            grep -E "kTCCServiceMicrophone|requires entitlement|disallows prompt|AUTHREQ_RESULT|auth_value|Prompting" | tail -12 || true
           PROBE
 
       - name: The official Slicer, started from a shell (macOS)
@@ -246,6 +254,9 @@ jobs:
         run: |
           python3 .github/scripts/mac_tcc_grant.py "$RUNNER_TEMP/Slicer.app"
           sudo python3 .github/scripts/mac_tcc_grant.py "$RUNNER_TEMP/Slicer.app"
+          killall tccd 2> /dev/null || true
+          sudo killall tccd 2> /dev/null || true
+          sleep 3
 
       - name: The enabled Slicer, started as the Dock starts it, allowed (macOS)
         if: runner.os == 'macOS'
