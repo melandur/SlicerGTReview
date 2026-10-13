@@ -1002,11 +1002,18 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.step("A Slicer macOS keeps from the microphone: an explanation instead of silence")
         widget = self.widget
         if sys.platform == "darwin":
+            signing = recording.macSigningProblem()
             if os.environ.get("GTREVIEW_EXPECT_MAC_MICROPHONE", "blocked") == "blocked":
-                CHECKS.check(bool(self.macProblem), "the official Slicer is found unable to use the microphone",
-                             str(self.macProblem))
+                CHECKS.check(bool(signing), "the official Slicer.app lacks what macOS asks for the microphone",
+                             str(signing))
             else:
-                CHECKS.check(self.macProblem is None, "this Slicer may use the microphone", str(self.macProblem))
+                CHECKS.check(signing is None, "this Slicer.app carries what macOS asks for the microphone",
+                             str(signing))
+            shell = recording._startedFromAShell()
+            CHECKS.check(self.macProblem == (None if shell else signing),
+                         "started from {}, it is {}".format("a shell" if shell else "launchd",
+                                                            "let try" if shell else "judged by its own app"),
+                         str(self.macProblem))
         else:
             CHECKS.check(self.macProblem is None, "only macOS keeps Slicer from the microphone")
         shown = []

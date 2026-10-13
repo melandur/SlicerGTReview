@@ -117,7 +117,33 @@ jobs:
           Start-Service Audiosrv -ErrorAction SilentlyContinue
           Get-Service Audiosrv, AudioEndpointBuilder | Format-Table Name, Status
           Get-CimInstance Win32_SoundDevice | Format-Table Name, Status
-          python -c "import math, struct, wave; w = wave.open(r'$env:RUNNER_TEMP\tone.wav', 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000); w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(2 * math.pi * 440 * i / 48000))) for i in range(48000 * 20))); w.close()"
+          foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone',
+                           'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged',
+                           'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone') {
+            "{0}: {1}" -f $key, (Get-ItemProperty -Path $key -Name Value -ErrorAction SilentlyContinue).Value
+          }
+          python -c "import math, struct, wave; w = wave.open(r'$env:RUNNER_TEMP\tone.wav', 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000); w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(2 * math.pi * 440 * i / 48000))) for i in range(48000 * 30))); w.close()"
+          $player = New-Object System.Media.SoundPlayer "$env:RUNNER_TEMP\tone.wav"
+          $player.PlayLooping()
+          Start-Process -Wait -FilePath $env:SLICER -ArgumentList '--no-splash', '--disable-settings', '--ignore-slicerrc', '--no-main-window', '--additional-module-path', "$env:GITHUB_WORKSPACE\GTReview", '--python-script', "$env:GITHUB_WORKSPACE\.github\scripts\microphone_probe.py"
+          $player.Stop()
+          Get-Content $env:PROBE_REPORT
+
+      - name: The same with "Let desktop apps access your microphone" on (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          PROBE_REPORT: ${{ runner.temp }}\probe-windows-allowed.json
+          PROBE_DEVICE: cable
+        run: |
+          foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone',
+                           'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged',
+                           'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone') {
+            New-Item -Path $key -Force | Out-Null
+            Set-ItemProperty -Path $key -Name Value -Value Allow
+          }
           $player = New-Object System.Media.SoundPlayer "$env:RUNNER_TEMP\tone.wav"
           $player.PlayLooping()
           Start-Process -Wait -FilePath $env:SLICER -ArgumentList '--no-splash', '--disable-settings', '--ignore-slicerrc', '--no-main-window', '--additional-module-path', "$env:GITHUB_WORKSPACE\GTReview", '--python-script', "$env:GITHUB_WORKSPACE\.github\scripts\microphone_probe.py"
@@ -126,7 +152,9 @@ jobs:
 
       # ------------------------------------------------------------------ macOS
       # What the microphone really hands Slicer: BlackHole, a virtual audio
-      # device, carries a 440 Hz tone from its output to its input.
+      # device, carries a 440 Hz tone from its output to its input.  Started
+      # from this shell, Slicer is judged by the shell's permission; started
+      # with `open`, as the Dock and the Finder do, by its own app.
       - name: A virtual microphone playing a tone (macOS)
         if: runner.os == 'macOS'
         continue-on-error: true
@@ -143,34 +171,63 @@ jobs:
               w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
               w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(rate * 180)))
           "
-          system_profiler SPAudioDataType | grep -E "^ {8}[A-Z].*:$|Input|Output" || true
+          cat > "$RUNNER_TEMP/probe.sh" <<'PROBE'
+          # $1: "shell" (Slicer started from here) or "open" (as the Dock does)
+          afplay "$RUNNER_TEMP/tone.wav" &
+          tone=$!
+          sleep 1
+          since=$(date "+%Y-%m-%d %H:%M:%S")
+          arguments=(--no-splash --disable-settings --ignore-slicerrc --no-main-window
+                     --additional-module-path "$GITHUB_WORKSPACE/GTReview"
+                     --python-script "$GITHUB_WORKSPACE/.github/scripts/microphone_probe.py")
+          if [[ "$1" == open ]]; then
+            open -W -n -a "$RUNNER_TEMP/Slicer.app" --env PROBE_REPORT="$PROBE_REPORT" --env PROBE_DEVICE=blackhole --args "${arguments[@]}" || true
+          else
+            PROBE_DEVICE=blackhole "$SLICER" "${arguments[@]}" || true
+          fi
+          kill $tone 2> /dev/null || true
+          cat "$PROBE_REPORT" || echo "no report: Slicer did not get to write one"
+          echo "-- what macOS's privacy service decided"
+          sudo log show --start "$since" --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS[c] "Microphone"' --style compact 2> /dev/null | tail -25 || true
+          ls -t ~/Library/Logs/DiagnosticReports 2> /dev/null | head -3 || true
+          PROBE
 
-      - name: What the official Slicer hears (macOS)
+      - name: The official Slicer, started from a shell (macOS)
         if: runner.os == 'macOS'
         continue-on-error: true
         timeout-minutes: 6
         env:
-          PROBE_REPORT: ${{ runner.temp }}/probe-official.json
-        run: |
-          afplay "$RUNNER_TEMP/tone.wav" &
-          tone=$!
-          sleep 1
-          "$SLICER" --no-splash --disable-settings --ignore-slicerrc --no-main-window \
-            --additional-module-path "$GITHUB_WORKSPACE/GTReview" \
-            --python-script "$GITHUB_WORKSPACE/.github/scripts/microphone_probe.py" || true
-          kill $tone 2> /dev/null || true
-          cat "$PROBE_REPORT"
+          PROBE_REPORT: ${{ runner.temp }}/probe-official-shell.json
+        run: bash "$RUNNER_TEMP/probe.sh" shell
+
+      - name: The official Slicer, started as the Dock starts it (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          PROBE_REPORT: ${{ runner.temp }}/probe-official-open.json
+        run: bash "$RUNNER_TEMP/probe.sh" open
 
       - name: Let this Slicer use the microphone, with the script GTReview ships (macOS)
         if: runner.os == 'macOS'
         run: |
+          ls -d "$RUNNER_TEMP"/Slicer.app/Contents/*.* || true
           bash GTReview/Resources/GTReviewMacMicrophone.sh "$RUNNER_TEMP/Slicer.app"
+          ls -d "$RUNNER_TEMP"/Slicer.app/Contents/*.* || true
           for code in "$RUNNER_TEMP/Slicer.app" "$RUNNER_TEMP/Slicer.app/Contents/bin/SlicerApp-real"; do
             echo "== $code"; codesign -dv "$code" 2>&1 | grep -E "flags|Signature"
             codesign -d --entitlements :- "$code" 2>/dev/null | plutil -p - || true
           done
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$RUNNER_TEMP/Slicer.app/Contents/Info.plist"
           codesign --verify --verbose=2 "$RUNNER_TEMP/Slicer.app" || echo "(the app's seal does not verify)"
+
+      - name: The enabled Slicer, started as the Dock starts it, before anyone allowed it (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          PROBE_REPORT: ${{ runner.temp }}/probe-enabled-open.json
+        run: bash "$RUNNER_TEMP/probe.sh" open
 
       - name: Allow the microphone, as a click on "Allow" would (macOS)
         if: runner.os == 'macOS'
@@ -179,21 +236,13 @@ jobs:
           python3 .github/scripts/mac_tcc_grant.py "$RUNNER_TEMP/Slicer.app"
           sudo python3 .github/scripts/mac_tcc_grant.py "$RUNNER_TEMP/Slicer.app"
 
-      - name: What the enabled Slicer hears (macOS)
+      - name: The enabled Slicer, started as the Dock starts it, allowed (macOS)
         if: runner.os == 'macOS'
         continue-on-error: true
         timeout-minutes: 6
         env:
-          PROBE_REPORT: ${{ runner.temp }}/probe-enabled.json
-        run: |
-          afplay "$RUNNER_TEMP/tone.wav" &
-          tone=$!
-          sleep 1
-          "$SLICER" --no-splash --disable-settings --ignore-slicerrc --no-main-window \
-            --additional-module-path "$GITHUB_WORKSPACE/GTReview" \
-            --python-script "$GITHUB_WORKSPACE/.github/scripts/microphone_probe.py" || true
-          kill $tone 2> /dev/null || true
-          cat "$PROBE_REPORT"
+          PROBE_REPORT: ${{ runner.temp }}/probe-enabled-allowed-open.json
+        run: bash "$RUNNER_TEMP/probe.sh" open
 
       - name: Recording integration test in the enabled Slicer (macOS)
         if: runner.os == 'macOS'

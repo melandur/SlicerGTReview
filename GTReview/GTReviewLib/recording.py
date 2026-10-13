@@ -256,13 +256,33 @@ def macMicrophoneProblem():
     as the official Slicer builds are -- if its signature carries the
     audio-input entitlement.  Otherwise the microphone delivers silence and
     nobody is asked.  Slicer 5.12 has neither; GTReviewMacMicrophone.sh adds
-    both.  Found out once a session; None on other systems."""
+    both.  A Slicer started from a terminal is judged by the terminal instead
+    (measured: the official Slicer heard a tone that way), so it is let try.
+    Found out once a session; None on other systems."""
     if "problem" not in _MAC_MICROPHONE:
-        _MAC_MICROPHONE["problem"] = _macMicrophoneProblem()
+        problem = macSigningProblem()
+        if problem and _startedFromAShell():
+            problem = None
+        _MAC_MICROPHONE["problem"] = problem
     return _MAC_MICROPHONE["problem"]
 
 
-def _macMicrophoneProblem():
+def _startedFromAShell():
+    """Whether Slicer was started from a shell rather than by the Finder, the
+    Dock or ``open``, which start it from launchd (process 1)."""
+    launcher = os.getppid()  # the launcher in Contents/MacOS, or a shell
+    if launcher <= 1:
+        return False
+    result = _run(["ps", "-o", "ppid=", "-p", str(launcher)])
+    try:
+        return int(result[1].strip()) > 1
+    except Exception:  # noqa: BLE001 - not known: assume the usual start
+        return False
+
+
+def macSigningProblem():
+    """What in this Slicer.app keeps macOS from handing it the microphone
+    (its Info.plist, its signature), or None; None on other systems."""
     bundle = macAppBundle()
     if bundle is None:
         return None
@@ -1591,8 +1611,9 @@ class Recorder:
             elif (not self._silenceWarned and not self.mic.heardSomething
                     and now - (self.mic.started or now) > SILENCE_WARNING_SECONDS):
                 self._silenceWarned = True
-                hint = ("Check that Slicer may use it: System Settings > Privacy & Security > "
-                        "Microphone." if sys.platform == "darwin" else
+                hint = ("Check that Slicer may use it, under System Settings > Privacy & Security > "
+                        "Microphone; Slicer as downloaded first needs GTReviewMacMicrophone.sh, see "
+                        "\"Enable the microphone\" in GTReview's README." if sys.platform == "darwin" else
                         "Check that the microphone is not muted and that the system lets "
                         "desktop apps use it (Windows: Settings > Privacy > Microphone).")
                 self._onWarning("The microphone records pure silence. " + hint)

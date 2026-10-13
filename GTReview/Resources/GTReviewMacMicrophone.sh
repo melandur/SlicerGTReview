@@ -44,17 +44,43 @@ fi
 WHY="GTReview records your voice during a review, so that whoever listens later knows which lesion you meant."
 WORK="$(mktemp -d)"
 cp -p "$PLIST" "$WORK/Info.plist.original"
+# Slicer keeps its settings and extensions -- GTReview among them -- in
+# Contents/slicer.org, which codesign takes for a broken nested bundle and
+# refuses to sign around.  Folders like it wait outside while the app is
+# signed, as they did before Slicer first ran, and always come back: the
+# temporary folder is removed only once they are.
+ASIDE="$WORK/aside"
+MOVED=()
 cleanup() {
     status=$?
+    restored=1
+    # (macOS's bash 3.2 calls an empty "${MOVED[@]}" unbound)
+    for name in ${MOVED[@]+"${MOVED[@]}"}; do
+        if ! mv "$ASIDE/$name" "$APP/Contents/$name"; then
+            echo "error: Slicer's $name is in $ASIDE -- move it back into $APP/Contents/" >&2
+            restored=0
+            status=1
+        fi
+    done
     if [[ $status -ne 0 && -f "$WORK/Info.plist.original" ]]; then
         # signing failed half way: put Slicer's own Info.plist back, which its
         # signature still matches
         cp -p "$WORK/Info.plist.original" "$PLIST"
         echo "error: nothing was changed that Slicer's own signature does not cover" >&2
     fi
-    rm -rf "$WORK"
+    if [[ $restored -eq 1 ]]; then
+        rm -rf "$WORK"
+    fi
+    exit $status
 }
 trap cleanup EXIT
+for folder in "$APP"/Contents/*.*; do
+    if [[ -d "$folder" ]]; then
+        mkdir -p "$ASIDE"
+        mv "$folder" "$ASIDE/"
+        MOVED+=("$(basename "$folder")")
+    fi
+done
 
 # Sign $1 again, ad hoc and with the hardened runtime, with the entitlements
 # it has plus the microphone.
