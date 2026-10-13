@@ -8,6 +8,8 @@ Point it at a batch directory, step through the cases, inspect every connected
 lesion in a sortable table, fix what is wrong with Slicer's own segment editor,
 and write the result to a new `_reviewed_seg.nii.gz` beside the source data.
 
+![The GTReview panel, from the batch to the recording, beside the Four-Up views of a synthetic case with its largest lesion selected](Screenshots/1.png)
+
 - **Category:** Segmentation
 - **Module name:** GTReview
 - **Requires:** 3D Slicer 5.12 Stable, 5.12.4 recommended (the macOS package
