@@ -160,7 +160,7 @@ class EventLogTest(unittest.TestCase):
             self.assertEqual(json.load(handle)["case_id"], "Zürich-α")
 
 
-class SidecarTest(unittest.TestCase):
+class TimelineTest(unittest.TestCase):
     def setUp(self):
         self.events = [
             {"t": 0.5, "type": "case_loaded"},
@@ -179,7 +179,7 @@ class SidecarTest(unittest.TestCase):
         self.assertEqual(recordlog.lesion_text(lesionEvent(0, kind=LESION_CLEARED)),
                          "No lesion selected")
 
-    def test_intervals_cover_the_segment_without_gaps(self):
+    def test_intervals_cover_the_take_without_gaps(self):
         intervals = recordlog.lesion_intervals(self.events, 10.0)
         self.assertEqual([(a, b) for a, b, _ in intervals],
                          [(0.0, 2.0), (2.0, 5.0), (5.0, 8.0), (8.0, 10.0)])
@@ -191,35 +191,9 @@ class SidecarTest(unittest.TestCase):
         self.assertEqual(len(intervals), 1)
         self.assertTrue(intervals[0][2].startswith("Lesion #4"))
 
-    def test_srt_times_and_offset(self):
-        intervals = recordlog.lesion_intervals(self.events, 10.0)
-        text = recordlog.srt(intervals, offset=3.0)
-        blocks = text.strip().split("\n\n")
-        # the stretch from 0 to 2 s lies before a file that starts at 3 s
-        self.assertEqual(len(blocks), 3)
-        self.assertIn("00:00:00,000 --> 00:00:02,000", blocks[0])
-        self.assertTrue(blocks[0].startswith("1\n"))
-        self.assertIn("00:00:05,000 --> 00:00:07,000", blocks[2])
-
-    def test_srt_clipped_to_the_media_duration(self):
-        intervals = recordlog.lesion_intervals(self.events, 10.0)
-        text = recordlog.srt(intervals, offset=0.0, duration=6.0)
-        self.assertNotIn("No lesion selected\n", text.split("\n\n")[-1] + "\n")
-        self.assertIn("00:00:05,000 --> 00:00:06,000", text)
-
-    def test_srt_time_format(self):
-        self.assertEqual(recordlog.format_srt_time(3725.5), "01:02:05,500")
-        self.assertEqual(recordlog.format_srt_time(-1), "00:00:00,000")
+    def test_clock_format(self):
         self.assertEqual(recordlog.format_clock(3725.9), "1:02:05")
-
-    def test_audacity_labels_regions_and_points(self):
-        lines = recordlog.audacity_labels(self.events, 10.0).strip().split("\n")
-        rows = [line.split("\t") for line in lines]
-        self.assertTrue(all(len(row) == 3 for row in rows))
-        starts = [float(row[0]) for row in rows]
-        self.assertEqual(starts, sorted(starts))
-        self.assertIn(["6.000000", "6.000000", "Lesion #3 deleted"], rows)
-        self.assertIn("Lesion #1", rows[2][2])  # the region from 2 s to 5 s
+        self.assertEqual(recordlog.format_clock(-1), "0:00:00")
 
     def test_ffmetadata_chapters_in_milliseconds(self):
         intervals = recordlog.lesion_intervals(self.events, 10.0)
@@ -275,9 +249,10 @@ class FileNameTest(unittest.TestCase):
         self.assertEqual(recordlog.safe_name("P39 2023/11:09"), "P39_2023_11_09")
         self.assertEqual(recordlog.safe_name("..."), "case")
 
-    def test_segment_stem(self):
+    def test_take_stem(self):
         when = datetime.datetime(2026, 10, 13, 9, 5, 7)
-        self.assertEqual(recordlog.segment_stem("1-007-03", when), "1-007-03_20261013-090507")
+        self.assertEqual(recordlog.take_stem("1-007-03", when), "1-007-03_20261013-090507")
+        self.assertEqual(recordlog.take_stem("P39 2023/11", when), "P39_2023_11_20261013-090507")
 
     def test_unique_stem(self):
         tmp = tempfile.mkdtemp(prefix="gtreview_stem_")

@@ -1,24 +1,24 @@
 """Record the reader's voice and the axial views during a review -- the Slicer half.
 
-Two independent switches in the panel: the microphone and the video.  While
-either is on, everything goes into one *segment* per case, in
-``<batch>/GTReview-recordings/<case_id>/``, under a stem
-``<case_id>_<YYYYMMDD-HHMMSS>`` shared by every file of the segment:
+Two switches in the panel, and one recording per case for each, in the batch
+folder's ``GTReview-recordings``:
 
-``<stem>_mic.wav``
-    the microphone as captured, 16-bit PCM, written as it arrives
-``<stem>.wav``
-    the narrated copy: a chime and "lesion three" spoken in wherever the
-    reader moved to another lesion, the reader's voice turned down under it
-``<stem>.srt``, ``<stem>_labels.txt``
-    the active lesion as subtitles (VLC, mpv) and as an Audacity label track
-``<stem>.mp4`` (``<stem>.ogv`` without ffmpeg)
+``microphone/<case_id>.wav``
+    the microphone, narrated: a chime and "lesion three" spoken in wherever the
+    reader moved to another lesion, the reader's voice turned down under it,
+    and a WAV cue point at every lesion change
+``video/<case_id>.mp4``
     the view area, or one slice view, under a banner naming the case and the
-    active lesion; with the narrated audio and one chapter per lesion when
-    ffmpeg muxes it
-``<stem>.json``
+    active lesion, with the narrated microphone as its sound and one chapter
+    per lesion -- recording the video records the microphone with it
+``<case_id>.json``, next to each
     every event with the lesion's seed voxel, which survives renumbering --
     the record a later re-annotation can follow exactly
+
+Recording a case again replaces its recording of that kind, once the panel has
+asked (``confirmReplace``); the old one stays until the new one is saved.
+While a take runs, its files are ``<case_id>_<YYYYMMDD-HHMMSS>.recording.*``
+in the same folder, written as they come in, so a crash leaves them playable.
 
 Capture never leaves Slicer's process.  The video is rendered from Slicer's own
 views (no OS screen-recording permission, any monitor, a covered window); the
@@ -28,8 +28,12 @@ what it cannot hold is padded with silence (see :class:`recordlog.AudioClock`)
 so the rest stays in step.
 
 Encoding happens off the main thread: frames are piped to an ffmpeg process by
-a writer thread, and a finished segment is turned into its files by a thread
-of its own.  Nothing in those threads touches Qt, VTK or the scene.
+a writer thread, and a finished take is turned into its file by a thread of
+its own, one take after the other.  Nothing in those threads touches Qt, VTK or
+the scene.  Slicer's main thread keeps Python's GIL while it idles in Qt, so
+while a take is saved a timer hands it over every few milliseconds, as Slicer's
+own SimpleFilters module does (measured: without it, the saving thread ran at
+3 % of its speed, and a half-minute recording took two minutes to appear).
 """
 
 import datetime
@@ -47,7 +51,6 @@ import time
 import ctk
 import qt
 import slicer
-import vtk
 
 import numpy as np
 
@@ -59,6 +62,16 @@ VOICE_DIR = os.path.join(
 )
 #: the folder of the batch directory recordings go into
 RECORDINGS_FOLDER = "GTReview-recordings"
+#: the two kinds of recording: the folder each has in RECORDINGS_FOLDER, and
+#: the file every case gets in it
+MICROPHONE = "microphone"
+VIDEO = "video"
+MEDIA_SUFFIX = {MICROPHONE: ".wav", VIDEO: ".mp4"}
+#: the files of a take while it runs (``.recording``) and while it is saved
+WORKING_SUFFIXES = (
+    ".recording.wav", ".recording.mp4", ".narrated.wav",
+    ".saving.wav", ".saving.mp4", ".saving.json", "_chapters.txt",
+)
 #: what the microphone is asked for; the device may offer something close
 AUDIO_RATE = 16000
 AUDIO_CHANNELS = 1
@@ -77,44 +90,55 @@ QUIET_SECONDS = 4.0
 #: a microphone that delivered nothing but exact zeros for this long is muted
 #: by the system (macOS: Slicer has no microphone permission)
 SILENCE_WARNING_SECONDS = 4.0
-#: video frame rate and largest frame, with ffmpeg
+#: video frame rate and largest frame
 VIDEO_FPS = 10
 VIDEO_MAX_SIZE = (1920, 1080)
-#: without ffmpeg: VTK's Theora writer encodes on the main thread, so less
-THEORA_FPS = 5
-THEORA_MAX_SIZE = (960, 540)
 #: the strip above the views naming the case and the lesion
 BANNER_HEIGHT = 26
 #: Slicer's setting for ffmpeg, shared with the Screen Capture module
 FFMPEG_SETTING = "General/ffmpegPath"
 #: frames waiting for the encoder; past this the newest repeat the last one
 FRAME_QUEUE = 30
-#: finishing a segment (encoder flush, mux) may take this long at exit
+#: finishing a take (encoder flush, mux) may take this long at exit
 FINISH_TIMEOUT_S = 120
+#: while a take is saved, the main thread sleeps this long this often, which
+#: lets the saving thread have the GIL (measured: a thread that took 0.3 s
+#: alone took 20 s while Slicer idled, 0.5 s with this)
+GIL_VALVE_MS = 20
+GIL_VALVE_SLEEP_S = 0.001
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 #: queued in place of a frame: show the last frame again
 _REPEAT_LAST = object()
 
 
-_ENVIRONMENT = None
+_STARTUP_ENVIRONMENT = None
 
 
-def _environment():
-    """The environment for outside programs: Slicer's own library paths would
-    break a system ffmpeg or pactl on Linux.
+def _startupEnvironment():
+    """The environment Slicer was started with, before its launcher put its own
+    library and Python paths in: what outside programs need on Linux, where
+    Slicer's copies of system libraries break them (a file manager started
+    with Slicer's paths died on Slicer's libgssapi_krb5, measured).
 
     Read from Slicer once, on the main thread (the Recorder asks at once), and
     kept: the finishing thread runs ffmpeg too, and must not call into Qt."""
-    global _ENVIRONMENT
-    if _ENVIRONMENT is None:
+    global _STARTUP_ENVIRONMENT
+    if _STARTUP_ENVIRONMENT is None:
         try:
             env = dict(slicer.util.startupEnvironment())
         except Exception:  # noqa: BLE001 - very old Slicer
             env = dict(os.environ)
-        env["LC_ALL"] = "C"
-        _ENVIRONMENT = env
-    return dict(_ENVIRONMENT)
+        _STARTUP_ENVIRONMENT = env
+    return dict(_STARTUP_ENVIRONMENT)
+
+
+def _environment():
+    """The startup environment in the C locale: for programs whose output is
+    read (ffmpeg, pactl)."""
+    env = _startupEnvironment()
+    env["LC_ALL"] = "C"
+    return env
 
 
 def _run(command, timeout=10.0):
@@ -133,6 +157,13 @@ def _run(command, timeout=10.0):
 # --------------------------------------------------------------------------- #
 # where recordings go
 # --------------------------------------------------------------------------- #
+def _homeFolder(batchDir):
+    return os.path.join(
+        os.path.expanduser("~"), RECORDINGS_FOLDER,
+        recordlog.safe_name(os.path.basename(os.path.normpath(batchDir))),
+    )
+
+
 def recordingsFolder(batchDir):
     """``<batch>/GTReview-recordings``; ``~/GTReview-recordings/<batch>`` when the
     batch folder cannot be written (a read-only share)."""
@@ -143,11 +174,48 @@ def recordingsFolder(batchDir):
         probe.close()
         return preferred
     except OSError:
-        fallback = os.path.join(
-            os.path.expanduser("~"), RECORDINGS_FOLDER, recordlog.safe_name(os.path.basename(batchDir))
-        )
+        fallback = _homeFolder(batchDir)
         os.makedirs(fallback, exist_ok=True)
         return fallback
+
+
+def recordingsFolders(batchDir):
+    """Where the recordings of *batchDir* can be, the usual place first;
+    nothing is created."""
+    return [os.path.join(batchDir, RECORDINGS_FOLDER), _homeFolder(batchDir)]
+
+
+def recordingPath(root, kind, caseId):
+    """The recording of *kind* a case keeps: ``<root>/<kind>/<case_id>.wav|.mp4``."""
+    return os.path.join(root, kind, recordlog.safe_name(caseId) + MEDIA_SUFFIX[kind])
+
+
+def openFolder(path):
+    """Show *path* in the system's file manager; False when nothing opened it.
+
+    On Linux not through Qt: QDesktopServices starts ``xdg-open`` with Slicer's
+    library path, and the file manager that starts then loads Slicer's copies
+    of system libraries -- one died on the spot, so the button did nothing.
+    With Slicer's startup environment it runs as if started from the desktop.
+    """
+    path = os.path.abspath(path)
+    if sys.platform.startswith("linux"):
+        env = _startupEnvironment()
+        opener = shutil.which("xdg-open", path=env.get("PATH"))
+        if opener:
+            try:
+                process = subprocess.Popen(
+                    [opener, path], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
+                )
+            except OSError:
+                logging.warning("GTReview: xdg-open could not be started", exc_info=True)
+            else:
+                # reaped in the background: xdg-open returns once the file
+                # manager is up, and must not stay a zombie meanwhile
+                threading.Thread(target=process.wait, name="GTReview xdg-open", daemon=True).start()
+                return True
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path)))
 
 
 # --------------------------------------------------------------------------- #
@@ -282,8 +350,8 @@ class MicrophoneInput:
         self.drain()
 
     def drain(self):
-        """Pass on whatever audio is waiting.  Called before a segment switch,
-        so audio captured before it does not land after it."""
+        """Pass on whatever audio is waiting.  Called before a take ends, so
+        audio captured before it does not land after it."""
         if self._io is None:
             return
         try:
@@ -351,7 +419,8 @@ def findFfmpeg(refresh=False):
 
     Looked for where Slicer's Screen Capture module keeps it, then in the
     ``imageio-ffmpeg`` package, then on the PATH.  *h264* says whether it has
-    libx264; without, the video is MPEG-4 part 2.
+    libx264; without, the video is MPEG-4 part 2.  The video needs it: it is
+    what puts the sound into the video.
     """
     if _FFMPEG and not refresh:
         return _FFMPEG["path"], _FFMPEG["h264"]
@@ -464,47 +533,6 @@ class FfmpegWriter:
         return self.error is None
 
 
-class TheoraWriter:
-    """VTK's own Ogg/Theora encoder, for when there is no ffmpeg.  It runs on
-    the main thread, so the video is smaller and slower (THEORA_*)."""
-
-    def __init__(self, path, width, height, fps):
-        self.path = path
-        self.frames = 0
-        self.error = None
-        self._image = vtk.vtkImageData()
-        self._writer = vtk.vtkOggTheoraWriter()
-        self._writer.SetInputData(self._image)
-        self._writer.SetFileName(path)
-        self._writer.SetRate(int(fps))
-        self._writer.SetQuality(1)
-        self._started = False
-
-    broken = property(lambda self: self.error is not None)
-
-    def push(self, frame, repeat=1):
-        try:
-            ctk.ctkVTKWidgetsUtils.qImageToVTKImageData(frame, self._image)
-            self._image.Modified()
-            if not self._started:
-                self._writer.Start()
-                self._started = True
-            for _ in range(int(repeat)):
-                self._writer.Write()
-            self.frames += int(repeat)
-        except Exception as error:  # noqa: BLE001
-            self.error = "Theora encoding failed ({})".format(error)
-
-    def close(self, timeout=None):
-        """Finish the file; once.  The recorder closes it on the main thread
-        (VTK) when it stops, so the finishing thread finds it done."""
-        del timeout
-        if self._started:
-            self._started = False
-            self._writer.End()
-        return self.error is None
-
-
 # --------------------------------------------------------------------------- #
 # frames
 # --------------------------------------------------------------------------- #
@@ -603,14 +631,16 @@ def composeFrame(image, size, clock, case, lesion):
 
 
 # --------------------------------------------------------------------------- #
-# segments
+# takes
 # --------------------------------------------------------------------------- #
-class Segment:
-    """What is recorded of one case between two switches: the files, the
-    writers while it runs, and the event log."""
+class Take:
+    """One recording of one case, of one kind (MICROPHONE or VIDEO): from the
+    switch, or the case switch, that started it to the one that ended it."""
 
-    def __init__(self, folder, stem, meta, start):
+    def __init__(self, kind, folder, name, stem, meta, start):
+        self.kind = kind
         self.folder = folder
+        self.name = name
         self.stem = stem
         self.start = start
         self.log = recordlog.EventLog(meta)
@@ -619,20 +649,30 @@ class Segment:
         self.audioDevice = ""
         self.gaps = []
         self.writer = None
-        self.videoKind = None
+        self.h264 = False
         self.videoOffset = None
         self.videoSize = None
         self.videoFps = None
         self.videoSource = ""
         self.pacer = None
         self.lastFrame = None
-        self.hadAudio = False
-        self.hadVideo = False
         self.ffmpeg = None
         self.end = None
+        self.problem = None
+        #: whether the saved video carries the microphone
+        self.sound = False
 
-    def path(self, suffix):
+    def working(self, suffix):
+        """A file of this take while it runs or is saved."""
         return os.path.join(self.folder, self.stem + suffix)
+
+    def export(self, suffix):
+        """The case's recording of this kind, which this take replaces."""
+        return os.path.join(self.folder, self.name + suffix)
+
+    @property
+    def target(self):
+        return self.export(MEDIA_SUFFIX[self.kind])
 
     def at(self, now):
         return max(0.0, now - self.start)
@@ -649,163 +689,177 @@ def _voice(rate):
         return _VOICE_CACHE[rate]
 
 
-def finishSegment(segment):
-    """Turn a stopped segment into its files.  Runs in a thread: no Qt, VTK or
-    scene access.  Returns the paths written.
+def finishTake(take):
+    """Turn a stopped take into the case's recording of its kind, replacing the
+    one it had.  Runs in a thread: no Qt, VTK or scene access.
 
-    Each step stands on its own, so one that fails -- a file a virus scanner
-    holds, a full disk -- costs only its own file, and the event log, the
-    record a re-annotation follows, is written whatever happened."""
-    written = []
-    log = segment.log
-    events = list(log.events)
-    end = float(segment.end or 0.0)
-    intervals = recordlog.lesion_intervals(events, end)
-    meta = log.meta
+    Returns ``(paths written, problem)``, *problem* being a sentence for the
+    reader when the take could not be saved as meant.  A case's recording is
+    replaced only by one that was made: a take that caught nothing leaves it
+    alone.  The take's own files go once it is saved, and stay whenever
+    something failed, so nothing recorded is ever lost."""
+    meta = take.log.meta
+    events = list(take.log.events)
+    end = float(take.end or 0.0)
     meta["ended"] = datetime.datetime.now().isoformat(timespec="seconds")
     meta["duration"] = end
+    working = [take.working(suffix) for suffix in WORKING_SUFFIXES]
+    keep = set()
+    produced = None
     try:
-        audio = _finishAudio(segment, events, end, meta, written)
-        video = _finishVideo(segment, audio, intervals, meta, written)
-        _writeSubtitles(segment, intervals, video, meta, written)
-    except Exception:  # noqa: BLE001 - the event log below still gets written
-        logging.exception("GTReview: finishing recording %s failed", segment.stem)
-    finally:
-        meta["files"] = sorted(os.path.basename(p) for p in written)
+        if take.kind == MICROPHONE:
+            produced = _finishMicrophone(take, events, meta)
+        else:
+            produced = _finishVideo(take, events, end, meta, keep)
+    except Exception as error:  # noqa: BLE001 - reported; the take's files stay
+        logging.exception("GTReview: saving %s failed", take.stem)
+        keep.update(working)
+        take.problem = "The {} recording of {} could not be saved ({}); what was recorded is kept as {}*.".format(
+            take.kind, take.name, error, take.stem)
+    written = []
+    if produced is not None:
+        written.append(produced)
+        meta["file"] = os.path.basename(produced)
         try:
-            log.write_json(segment.path(".json"))
-            written.append(segment.path(".json"))
-        except Exception:  # noqa: BLE001
-            logging.exception("GTReview: writing the event log of %s failed", segment.stem)
-    logging.info("GTReview: recording %s saved: %s", segment.stem, ", ".join(meta["files"]))
-    return written
+            saving = take.working(".saving.json")
+            take.log.write_json(saving)
+            maskio.replace_file(saving, take.export(".json"))
+            written.append(take.export(".json"))
+        except Exception:  # noqa: BLE001 - the recording itself is saved
+            logging.exception("GTReview: writing the event log of %s failed", take.stem)
+    for path in working:
+        if path in keep or not os.path.exists(path):
+            continue
+        try:
+            maskio.remove_file(path)
+        except OSError as error:
+            logging.warning("GTReview: %s left behind: %s", path, error)
+    logging.info("GTReview: %s recording of %s saved: %s", take.kind, take.name,
+                 ", ".join(os.path.basename(p) for p in written) or "nothing (nothing was recorded)")
+    return written, take.problem
 
 
-def _finishAudio(segment, events, end, meta, written):
-    """Cue points, the narrated copy and the label track; the WAV the video
-    should carry (the narrated one, else the microphone itself), or None."""
-    if segment.wav is None or not os.path.isfile(segment.wav.path):
-        return None
-    micPath = segment.wav.path
-    offset = float(segment.audioOffset or 0.0)
-    written.append(micPath)
-    audio = meta["audio"] = {
-        "device": segment.audioDevice, "offset": offset, "duration": segment.wav.seconds,
-        "gaps": segment.gaps, "microphone_file": os.path.basename(micPath),
+def _narrateInto(take, events, source, target, audio):
+    """*source* with the announcements mixed in, as *target*."""
+    rate, mic = wavfile.read_wav(source)
+    audio.update(rate=rate, channels=int(mic.shape[1]))
+    clips = _voice(rate)
+    placements = []
+    for at, names, _text in recordlog.announcement_schedule(events, float(audio["offset"])):
+        clip = wavfile.phrase(names, clips, rate)
+        if clip is not None:
+            placements.append((at, clip))
+    wavfile.write_wav(target, rate, wavfile.narrate(mic, rate, placements))
+    audio["announcements"] = len(placements)
+
+
+def _audioMeta(take, meta):
+    meta["audio"] = {
+        "device": take.audioDevice, "offset": float(take.audioOffset or 0.0),
+        "duration": take.wav.seconds, "gaps": take.gaps,
     }
-    marks = recordlog.cue_marks(events, offset)
-    try:
-        wavfile.append_cue_points(micPath, marks)
-    except Exception as error:  # noqa: BLE001 - the recording itself is intact
-        logging.warning("GTReview: no cue points in %s: %s", micPath, error)
-        audio["cue_error"] = str(error)
-    try:
-        with open(segment.path("_labels.txt"), "w", encoding="utf-8") as handle:
-            handle.write(recordlog.audacity_labels(events, end, offset))
-        written.append(segment.path("_labels.txt"))
-    except Exception as error:  # noqa: BLE001
-        logging.warning("GTReview: no label track for %s: %s", segment.stem, error)
-    try:
-        rate, mic = wavfile.read_wav(micPath)
-        audio.update(rate=rate, channels=int(mic.shape[1]))
-        clips = _voice(rate)
-        placements = []
-        for at, names, _text in recordlog.announcement_schedule(events, offset):
-            clip = wavfile.phrase(names, clips, rate)
-            if clip is not None:
-                placements.append((at, clip))
-        narrated = segment.path(".wav")
-        wavfile.write_wav(narrated, rate, wavfile.narrate(mic, rate, placements))
-        written.append(narrated)
-        audio.update(narrated_file=os.path.basename(narrated), announcements=len(placements))
-    except Exception as error:  # noqa: BLE001 - the video still gets the reader's voice
-        logging.exception("GTReview: narrating %s failed", segment.stem)
-        audio["narration_error"] = str(error)
-        return micPath
-    try:
-        wavfile.append_cue_points(narrated, marks)
-    except Exception as error:  # noqa: BLE001
-        logging.warning("GTReview: no cue points in %s: %s", narrated, error)
-    return narrated
+    return meta["audio"]
 
 
-def _finishVideo(segment, audioPath, intervals, meta, written):
-    """The finished video file; ``(offset, duration)`` of it, or None."""
-    if segment.writer is None:
+def _finishMicrophone(take, events, meta):
+    """``microphone/<case>.wav``: the narrated microphone with its cue points;
+    None when the microphone delivered nothing."""
+    if take.wav is None or take.wav.frames == 0 or not os.path.isfile(take.wav.path):
         return None
-    ok = segment.writer.close()  # ffmpeg flushes here; Theora was closed on the main thread
-    frames = segment.writer.frames
-    offset = float(segment.videoOffset or 0.0)
-    duration = frames / float(segment.videoFps or 1)
+    audio = _audioMeta(take, meta)
+    saving = take.working(".saving.wav")
+    try:
+        _narrateInto(take, events, take.wav.path, saving, audio)
+    except Exception as error:  # noqa: BLE001 - the reader's voice rather than nothing
+        logging.exception("GTReview: narrating %s failed", take.stem)
+        audio["narration_error"] = str(error)
+        maskio.replace_file(take.wav.path, saving)
+        take.problem = ("The lesion numbers could not be spoken into the recording of {} ({}); "
+                        "it is saved without them.".format(take.name, error))
+    try:
+        wavfile.append_cue_points(saving, recordlog.cue_marks(events, audio["offset"]))
+    except Exception as error:  # noqa: BLE001 - the recording itself is whole
+        logging.warning("GTReview: no cue points in %s: %s", saving, error)
+        audio["cue_error"] = str(error)
+    maskio.replace_file(saving, take.target)
+    return take.target
+
+
+def _finishVideo(take, events, end, meta, keep):
+    """``video/<case>.mp4`` with the narrated microphone and the chapters; None
+    when not a single frame was recorded."""
+    if take.writer is None:
+        return None
+    ok = take.writer.close()  # ffmpeg flushes here
+    frames = take.writer.frames
+    offset = float(take.videoOffset or 0.0)
+    duration = frames / float(take.videoFps or VIDEO_FPS)
     video = meta["video"] = {
-        "source": segment.videoSource or "all views", "encoder": segment.videoKind,
-        "fps": segment.videoFps, "size": list(segment.videoSize or ()), "frames": frames,
+        "source": take.videoSource or "all views", "codec": "H.264" if take.h264 else "MPEG-4",
+        "fps": take.videoFps, "size": list(take.videoSize or ()), "frames": frames,
         "offset": offset, "duration": duration,
     }
     if not ok:
-        video["error"] = segment.writer.error
-        logging.warning("GTReview: the video of %s: %s", segment.stem, segment.writer.error)
-    produced = segment.writer.path
-    if segment.videoKind == "mp4":
-        final = segment.path(".mp4")
-        try:
-            if ok and _mux(segment, audioPath, intervals, offset, duration, final):
-                maskio.remove_file(segment.writer.path)
-            elif os.path.isfile(segment.writer.path):
-                maskio.replace_file(segment.writer.path, final)  # unmuxed, but kept
-        except Exception as error:  # noqa: BLE001 - whichever file is there is listed
-            logging.warning("GTReview: tidying the video of %s: %s", segment.stem, error)
-            video["file_error"] = str(error)
-        produced = final if os.path.isfile(final) else segment.writer.path
-    if not os.path.isfile(produced):
+        video["error"] = take.writer.error
+        logging.warning("GTReview: the video of %s: %s", take.stem, take.writer.error)
+    if frames == 0 or not os.path.isfile(take.writer.path):
         return None
-    video["file"] = os.path.basename(produced)
-    written.append(produced)
-    return offset, duration
-
-
-def _writeSubtitles(segment, intervals, video, meta, written):
-    """``<stem>.srt``, which players load for ``<stem>.mp4`` / ``.ogv`` and for
-    ``<stem>.wav`` alike: on the video's clock when there is a video.  When the
-    microphone started at another moment than the video, the audio's own copy
-    is ``<stem>_audio.srt``."""
-    audio = meta.get("audio")
-    files = []
-    if video is not None:
-        files.append((".srt", video[0], video[1]))
-    if audio is not None:
-        if video is None:
-            files.append((".srt", audio["offset"], audio["duration"]))
-        elif abs(audio["offset"] - video[0]) > 0.25:
-            files.append(("_audio.srt", audio["offset"], audio["duration"]))
-    for suffix, offset, duration in files:
+    sound = None
+    if take.wav is not None and take.wav.frames > 0 and os.path.isfile(take.wav.path):
+        audio = _audioMeta(take, meta)
         try:
-            with open(segment.path(suffix), "w", encoding="utf-8") as handle:
-                handle.write(recordlog.srt(intervals, offset, duration))
-            written.append(segment.path(suffix))
-        except Exception as error:  # noqa: BLE001
-            logging.warning("GTReview: no subtitles for %s: %s", segment.stem, error)
+            _narrateInto(take, events, take.wav.path, take.working(".narrated.wav"), audio)
+            sound = take.working(".narrated.wav")
+        except Exception as error:  # noqa: BLE001 - the reader's voice rather than nothing
+            logging.exception("GTReview: narrating %s failed", take.stem)
+            audio["narration_error"] = str(error)
+            sound = take.wav.path
+            take.problem = ("The lesion numbers could not be spoken into the video of {} ({}); "
+                            "its sound is the microphone alone.".format(take.name, error))
+    saving = take.working(".saving.mp4")
+    intervals = recordlog.lesion_intervals(events, end)
+    if not _mux(take, sound, intervals, offset, duration, saving):
+        if not ok:
+            # neither the encoder nor ffmpeg's second pass made a video of it:
+            # the case keeps the one it had, and this take's files stay
+            keep.update(take.working(s) for s in WORKING_SUFFIXES)
+            take.problem = ("The video of {} could not be saved ({}); what was recorded is kept "
+                            "as {}*.".format(take.name, video.get("error"), take.stem))
+            return None
+        # the picture as encoded, without sound or chapters, is still the
+        # case's video; the sound stays next to it
+        video["mux_error"] = True
+        if sound is not None:
+            keep.add(sound)
+        maskio.replace_file(take.writer.path, saving)
+        take.problem = ("The sound could not be put into the video of {}; the video is saved "
+                        "without it{}.".format(take.name, ", and the sound is kept as " + os.path.basename(sound)
+                                               if sound else ""))
+    video["sound"] = take.sound and "mux_error" not in video
+    maskio.replace_file(saving, take.target)
+    return take.target
 
 
-def _mux(segment, audioPath, intervals, videoOffset, duration, final):
+def _mux(take, audioPath, intervals, videoOffset, duration, final):
     """The finished MP4: video, the narrated audio lined up with it, and one
     chapter per lesion.  False when ffmpeg refused."""
-    chapters = segment.path("_chapters.txt")
+    chapters = take.working("_chapters.txt")
     try:
         with open(chapters, "w", encoding="utf-8") as handle:
             handle.write(recordlog.ffmetadata(intervals, videoOffset, duration,
-                                              title=segment.log.meta.get("case_id")))
-        command = [segment.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", segment.writer.path]
-        audio = audioPath is not None and os.path.isfile(audioPath) and segment.wav is not None
+                                              title=take.log.meta.get("case_id")))
+        command = [take.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", take.writer.path]
+        audio = audioPath is not None and os.path.isfile(audioPath) and take.wav is not None
         if audio:
-            audioOffset = float(segment.audioOffset or 0.0)
-            overlap = (min(videoOffset + duration, audioOffset + segment.wav.seconds)
+            audioOffset = float(take.audioOffset or 0.0)
+            overlap = (min(videoOffset + duration, audioOffset + take.wav.seconds)
                        - max(videoOffset, audioOffset))
-            # a microphone started only after the video stopped shares nothing with it
+            # a microphone that stopped before the first frame shares nothing with it
             audio = overlap > 0.1
+        take.sound = bool(audio)
         if audio:
             # the audio clipped to the video's stretch of the clock; never the
-            # other way round: a microphone stopped early leaves the video whole
+            # other way round: a microphone lost early leaves the video whole
             shift = videoOffset - audioOffset
             command += ["-ss", "{:.3f}".format(shift)] if shift >= 0 else ["-itsoffset", "{:.3f}".format(-shift)]
             command += ["-t", "{:.3f}".format(duration + min(0.0, shift)), "-i", audioPath]
@@ -814,10 +868,10 @@ def _mux(segment, audioPath, intervals, videoOffset, duration, final):
             command += ["-map", "1:a", "-c:a", "aac", "-b:a", "96k"]
         meta = "2" if audio else "1"
         command += ["-map_metadata", meta, "-map_chapters", meta, "-c:v", "copy",
-                    "-movflags", "+faststart", final]
+                    "-movflags", "+faststart", "-f", "mp4", final]
         result = _run(command, timeout=FINISH_TIMEOUT_S)
         if result is None or result[0] != 0:
-            logging.warning("GTReview: muxing %s failed: %s", segment.stem,
+            logging.warning("GTReview: muxing %s failed: %s", take.stem,
                             (result[2] if result else "ffmpeg did not run")[-400:])
             if os.path.exists(final):
                 maskio.remove_file(final)
@@ -835,38 +889,50 @@ def _mux(segment, audioPath, intervals, videoOffset, duration, final):
 # the recorder
 # --------------------------------------------------------------------------- #
 class Recorder:
-    """Microphone and video switches, one segment per case.
+    """The microphone and video switches: one take per case for each.
 
-    The panel tells it what happens (:meth:`note`), when the case changes
+    The video records the microphone too, as its sound.  The panel tells the
+    recorder what happens (:meth:`note`), when the case changes
     (:meth:`caseChanged`) and what the banner should say (:meth:`setBanner`).
     *context()* returns the meta of the case on screen, or None without one.
-    Callbacks: *onChange()* after any switch, *onLevel(dBFS or None)*,
-    *onTick(seconds)* twice a second while recording, *onWarning(text)*, and
-    *onSegment()* right after a segment opens (to log the current lesion).
+
+    Callbacks: *onChange()* after any switch and when a take has been saved;
+    *onLevel(dBFS or None)*; *onTick(seconds)* twice a second while
+    recording; *onWarning(text)*; *onTake(take)* right after a take opens (to
+    log where the case stands, into that take); and *confirmReplace(case_id,
+    kinds, switching)*, asked before takes would replace recordings a case
+    already has -- *switching* when the reader moved on to that case while
+    recording.  Without it, recordings are replaced without asking.
     """
 
-    def __init__(self, context, onChange=None, onLevel=None, onTick=None, onWarning=None, onSegment=None):
+    def __init__(self, context, onChange=None, onLevel=None, onTick=None, onWarning=None,
+                 onTake=None, confirmReplace=None):
         self._context = context
         self._onChange = onChange or (lambda: None)
         self._onTick = onTick or (lambda seconds: None)
         self._onWarning = onWarning or (lambda text: None)
-        self._onSegment = onSegment or (lambda: None)
+        self._onTake = onTake or (lambda take: None)
+        self._confirmReplace = confirmReplace or (lambda caseId, kinds, switching: True)
         self.mic = MicrophoneInput(self._onAudio, onLevel)
         self.audioOn = False
         self.videoOn = False
         self.testing = False
         self.microphone = ("", "", "")
         self.videoSource = ""
-        self.segment = None
+        self.takes = {}
         self.banner = ("", "No lesion selected")
-        self._frames = 0
+        self.lastFolder = None
+        self.lastSaved = []
+        self._bytes = 0
         self._clock = None
         self._silenceWarned = False
         self._lastTick = None
         self._quiet = 0.0
-        self._writeError = None
+        self._micLost = None
         self._finishing = []
-        self.lastFolder = None
+        self._pending = {}
+        self._pendingLock = threading.Lock()
+        self._results = queue.SimpleQueue()
         _environment()  # read from Slicer here, on the main thread, once
         self._frameTimer = qt.QTimer()
         self._frameTimer.connect("timeout()", self._onFrameTick)
@@ -876,149 +942,217 @@ class Recorder:
         self._testTimer = qt.QTimer()
         self._testTimer.setSingleShot(True)
         self._testTimer.connect("timeout()", self.stopTest)
+        self._valveTimer = qt.QTimer()
+        self._valveTimer.setInterval(GIL_VALVE_MS)
+        self._valveTimer.connect("timeout()", self._onValve)
 
     # ---------------------------------------------------------------- state
     @property
     def recording(self):
         return self.audioOn or self.videoOn
 
+    @property
+    def capturing(self):
+        """The microphone is open for a recording, not for a level test."""
+        return self.mic.active and not self.testing
+
     def elapsed(self):
-        return self.segment.at(time.monotonic()) if self.segment is not None else 0.0
+        """Seconds since the oldest open take began."""
+        now = time.monotonic()
+        return max([take.at(now) for take in self.takes.values()] or [0.0])
 
     def busyFinishing(self):
         self._finishing = [t for t in self._finishing if t.is_alive()]
         return len(self._finishing)
 
-    def note(self, kind, **fields):
-        """Log an event in the open segment; ignored when nothing records."""
-        if self.segment is None:
-            return None
-        return self.segment.log.add(self.segment.at(time.monotonic()), kind, **fields)
+    def note(self, kind, take=None, **fields):
+        """Log an event into every open take, or into *take* only; ignored
+        when nothing records."""
+        now = time.monotonic()
+        event = None
+        for one in ([take] if take is not None else list(self.takes.values())):
+            event = one.log.add(one.at(now), kind, **fields)
+        return event
 
     def setBanner(self, case, lesion):
         self.banner = (str(case or ""), str(lesion or ""))
 
+    def hasRecording(self, context, kind):
+        """Whether the case of *context* has a recording of *kind*, saved or
+        still being saved."""
+        for root in recordingsFolders(context["batch_dir"]):
+            path = recordingPath(root, kind, context["case_id"])
+            if os.path.exists(path):
+                return True
+            with self._pendingLock:
+                if self._pending.get(path):
+                    return True
+        return False
+
     # ---------------------------------------------------------- microphone
     def startAudio(self, name, realm, label=""):
+        """Turn the microphone switch on: a take of the case on screen.  False
+        when the reader chose to keep the recording that case has."""
         if self.audioOn:
-            return
+            return True
         self.stopTest()
-        segment = self._ensureSegment(rollIf="hadAudio")
+        context = self._caseContext()
+        if not self._mayReplace(context, [MICROPHONE], switching=False):
+            return False
+        self._openMicrophone(name, realm, label)
         try:
-            self.mic.start(name, realm, label)
+            self._openTake(MICROPHONE, context)
         except Exception:
-            self._dropIfIdle()
+            self._closeMicrophone()
             raise
+        self.audioOn = True
+        self.lastSaved = []
+        self._started()
+        return True
+
+    def stopAudio(self):
+        """Turn the microphone switch off and save its take; always completes,
+        so a failing disk or device can never leave it recording."""
+        if not self.audioOn:
+            return
+        self.audioOn = False
         try:
-            segment.wav = wavfile.WavWriter(segment.path("_mic.wav"), self.mic.rate, self.mic.channels)
-        except Exception:
-            # an unwritable folder: close the microphone again, leave no segment
-            self.mic.stop()
-            self._dropIfIdle()
-            raise
+            self._closeTakes([MICROPHONE], "audio_stopped")
+        finally:
+            self._closeMicrophone()
+            self._stoppedOne()
+
+    def _openMicrophone(self, name, realm, label):
+        """Open the microphone for recording, unless it is open already."""
+        if self.mic.active:
+            return
+        self.mic.start(name, realm, label)
         self.microphone = (name, realm, label)
-        self._writeError = None
-        segment.audioOffset = segment.at(time.monotonic())
-        segment.audioDevice = self.mic.label
-        segment.hadAudio = True
-        self._frames = 0
+        self._bytes = 0
         self._clock = recordlog.AudioClock(self.mic.rate, time.monotonic())
         self._silenceWarned = False
         self._lastTick = None
         self._quiet = 0.0
-        self.audioOn = True
-        self.note("audio_started", device=self.mic.label, rate=self.mic.rate, channels=self.mic.channels)
-        self._started()
+        self._micLost = None
 
-    def stopAudio(self):
-        """Stop the microphone; always completes, so a failing disk or device
-        can never leave it recording."""
-        if not self.audioOn:
+    def _closeMicrophone(self):
+        """Close the microphone once neither switch needs it."""
+        if self.recording or self.testing or not self.mic.active:
             return
         try:
             self.mic.stop()
         except Exception:  # noqa: BLE001
             logging.exception("GTReview: stopping the microphone failed")
-        self.audioOn = False
-        self.note("audio_stopped")
-        self._closeWav(self.segment)
-        self._stoppedOne()
+        self._clock = None
 
     @staticmethod
-    def _closeWav(segment):
-        if segment is None or segment.wav is None or segment.wav.closed:
+    def _closeWav(take):
+        if take is None or take.wav is None or take.wav.closed:
             return
         try:
-            segment.wav.close()
+            take.wav.close()
         except OSError:
-            logging.exception("GTReview: closing %s failed", segment.wav.path)
+            logging.exception("GTReview: closing %s failed", take.wav.path)
 
     def _onAudio(self, data):
-        if self.testing or not self.audioOn or self._writeError is not None:
-            return
-        segment = self.segment
-        if segment is None or segment.wav is None or segment.wav.closed:
+        if self.testing or self._micLost is not None:
             return
         if self.mic.gone():
             # Checked on every delivery, not only on the clock: what arrives
             # now may already be another microphone's (see MicrophoneInput.gone)
-            self._microphoneGone()
+            self._microphoneLost(
+                "The microphone {} was disconnected.  (Left running, the system would have "
+                "carried on from another microphone.)".format(self.mic.label))
             return
-        try:
-            self._frames += segment.wav.write(data)
-        except OSError as error:
-            self._audioWriteFailed(segment, error)
+        self._bytes += len(data)
+        takes = [take for take in self.takes.values() if take.wav is not None and not take.wav.closed]
+        for take in takes:
+            try:
+                take.wav.write(data)
+            except OSError as error:
+                self._audioWriteFailed(take, error)
+                return
+        if self._clock is None:
             return
         # Judged when audio arrives, not on a timer: WinMM delivers in blocks
         # of seconds, and between two blocks the file is always "behind".
         now = time.monotonic()
-        missing = self._clock.observe(now, self._frames) if self._clock is not None else 0
-        if missing:
-            try:
-                self._frames += segment.wav.write_silence(missing)
-            except OSError as error:
-                self._audioWriteFailed(segment, error)
-                return
-            seconds = missing / float(self.mic.rate)
-            segment.gaps.append({"t": segment.at(now), "seconds": seconds})
-            self.note("audio_gap", seconds=seconds)
-            logging.warning("GTReview: %.1f s of microphone audio was lost; padded with silence", seconds)
-
-    def _microphoneGone(self):
-        """Stop the microphone that was unplugged, from the event loop; nothing
-        it delivers from now on is kept."""
-        if self._writeError is not None:
+        block = 2 * max(1, int(self.mic.channels or 1))
+        missing = self._clock.observe(now, self._bytes // block)
+        if not missing:
             return
-        self._writeError = "gone"
-        label = self.mic.label
+        seconds = missing / float(self.mic.rate)
+        self._bytes += missing * block
+        for take in takes:
+            try:
+                take.wav.write_silence(missing)
+            except OSError as error:
+                self._audioWriteFailed(take, error)
+                return
+            take.gaps.append({"t": take.at(now), "seconds": seconds})
+            take.log.add(take.at(now), "audio_gap", seconds=seconds)
+        logging.warning("GTReview: %.1f s of microphone audio was lost; padded with silence", seconds)
+
+    def _microphoneLost(self, text):
+        """The microphone stopped (unplugged, or the system took it): its take
+        is saved with what it has, and the video carries on without sound.
+        Done from the event loop, not from inside a delivery; nothing the
+        microphone delivers from now on is kept."""
+        if self._micLost is not None:
+            return
+        self._micLost = text
 
         def stop():
-            self.stopAudio()
-            self._onWarning("The microphone {} was disconnected, so its recording was stopped; "
-                            "what it recorded until then is kept.  (Left running, the system "
-                            "would have carried on from another microphone.)".format(label))
+            audio, video = self.audioOn, self.videoOn
+            self._dropMicrophone()
+            parts = [text]
+            if audio:
+                parts.append("The microphone recording was stopped; what it recorded until then is kept.")
+            if video:
+                parts.append("The video carries on without sound.")
+            self._onWarning("  ".join(parts))
 
         qt.QTimer.singleShot(0, stop)
 
-    def _audioWriteFailed(self, segment, error):
-        """The microphone file cannot be written (a full disk, a share gone).
-        Close it as far as it goes and stop the microphone from the event loop,
-        not from inside the delivery that failed."""
-        self._writeError = error
-        logging.error("GTReview: writing %s failed: %s", segment.wav.path, error)
-        self._closeWav(segment)
-        segment.log.add(segment.at(time.monotonic()), "audio_write_failed", detail=str(error))
+    def _dropMicrophone(self):
+        if self.audioOn:
+            self.audioOn = False
+            try:
+                self._closeTakes([MICROPHONE], "audio_stopped")
+            except Exception:  # noqa: BLE001
+                logging.exception("GTReview: saving the microphone recording failed")
+        video = self.takes.get(VIDEO)
+        if video is not None and video.wav is not None and not video.wav.closed:
+            video.log.add(video.at(time.monotonic()), "audio_stopped")
+            self._closeWav(video)
+        try:
+            self.mic.stop()
+        except Exception:  # noqa: BLE001
+            logging.exception("GTReview: stopping the microphone failed")
+        self._clock = None
+        self._stoppedOne()
+
+    def _audioWriteFailed(self, take, error):
+        """A recording file cannot be written (a full disk, a share gone).
+        Close it as far as it goes and stop everything from the event loop --
+        the other files are on the same disk."""
+        if self._micLost is not None:
+            return
+        self._micLost = str(error)
+        logging.error("GTReview: writing %s failed: %s", take.wav.path, error)
+        self._closeWav(take)
+        take.log.add(take.at(time.monotonic()), "audio_write_failed", detail=str(error))
 
         def stop():
-            self.stopAudio()
-            self._onWarning("The microphone recording could not be written ({}), so it was "
-                            "stopped; what reached the disk is kept.".format(error))
+            self.stopAll()
+            self._onWarning("The recording could not be written ({}), so it was stopped; "
+                            "what reached the disk is kept.".format(error))
 
         qt.QTimer.singleShot(0, stop)
 
     def startTest(self, name, realm, label="", seconds=10):
         """Open the microphone for *seconds* to watch its level; nothing is saved."""
-        if self.audioOn or self.testing:
+        if self.mic.active or self.testing:
             return
         self.mic.start(name, realm, label, hold=False)
         self.testing = True
@@ -1034,220 +1168,273 @@ class Recorder:
         self._onChange()
 
     # ---------------------------------------------------------------- video
-    def startVideo(self, source=""):
+    def startVideo(self, source="", name="", realm="", label=""):
+        """Turn the video switch on: a take of the case on screen, with
+        microphone *name* as its sound.  False when the reader chose to keep
+        the video that case has.  Needs ffmpeg."""
         if self.videoOn:
-            return
-        ffmpeg, _h264 = findFfmpeg()
-        self._ensureSegment(rollIf="hadVideo")
+            return True
+        if not findFfmpeg()[0]:
+            raise RuntimeError("Recording video needs ffmpeg: get it with \"Get ffmpeg...\".")
+        self.stopTest()
+        context = self._caseContext()
+        if not self._mayReplace(context, [VIDEO], switching=False):
+            return False
+        silent = None
+        try:
+            self._openMicrophone(name, realm, label)
+        except Exception as error:  # noqa: BLE001 - the video goes ahead without sound
+            silent = str(error)
+        try:
+            self._openTake(VIDEO, context, source)
+        except Exception:
+            self._closeMicrophone()
+            raise
         self.videoSource = source or ""
-        self.segment.videoSource = self.videoSource
-        self.segment.hadVideo = True
         self.videoOn = True
-        fps = VIDEO_FPS if ffmpeg else THEORA_FPS
-        self._frameTimer.setInterval(int(1000 / fps))
+        self.lastSaved = []
+        self._frameTimer.setInterval(int(1000 / VIDEO_FPS))
         self._frameTimer.start()
-        self.note("video_started", source=self.videoSource or "all views",
-                  encoder="ffmpeg" if ffmpeg else "theora")
         self._started()
+        if silent is not None:
+            self._onWarning("The video records without sound: {}".format(silent))
+        return True
 
     def stopVideo(self):
+        """Turn the video switch off and save its take."""
         if not self.videoOn:
             return
         self._frameTimer.stop()
-        self.note("video_stopped")
         self.videoOn = False
-        segment = self.segment
-        if segment is not None and segment.writer is not None and segment.videoKind == "ogv":
-            segment.writer.close()  # VTK: on the main thread
-        self._stoppedOne()
+        try:
+            self._closeTakes([VIDEO], "video_stopped")
+        finally:
+            self._closeMicrophone()
+            self._stoppedOne()
 
     def setVideoSource(self, source):
         """Change what the video shows; takes effect from the next frame."""
         self.videoSource = source or ""
-        if self.segment is not None and self.videoOn:
-            self.segment.videoSource = self.videoSource
-            self.note("video_source", source=self.videoSource or "all views")
+        take = self.takes.get(VIDEO)
+        if take is not None and self.videoOn:
+            take.videoSource = self.videoSource
+            self.note("video_source", take=take, source=self.videoSource or "all views")
 
-    def _openVideo(self, segment, image, now):
+    def _openVideo(self, take, image, now):
         ffmpeg, h264 = findFfmpeg()
-        if ffmpeg:
-            segment.videoSize = frameSize(image, VIDEO_MAX_SIZE)
-            segment.videoFps = VIDEO_FPS
-            segment.writer = FfmpegWriter(ffmpeg, h264, segment.path("_video.mp4"),
-                                          segment.videoSize[0], segment.videoSize[1], VIDEO_FPS)
-            segment.videoKind = "mp4"
-            segment.ffmpeg = ffmpeg
-        else:
-            segment.videoSize = frameSize(image, THEORA_MAX_SIZE)
-            segment.videoFps = THEORA_FPS
-            segment.writer = TheoraWriter(segment.path(".ogv"), segment.videoSize[0],
-                                          segment.videoSize[1], THEORA_FPS)
-            segment.videoKind = "ogv"
-        segment.videoOffset = segment.at(now)
-        segment.pacer = recordlog.FramePacer(segment.videoFps, now)
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg is not there any more")
+        take.videoSize = frameSize(image, VIDEO_MAX_SIZE)
+        take.videoFps = VIDEO_FPS
+        take.writer = FfmpegWriter(ffmpeg, h264, take.working(".recording.mp4"),
+                                   take.videoSize[0], take.videoSize[1], VIDEO_FPS)
+        take.h264 = bool(h264)
+        take.ffmpeg = ffmpeg
+        take.videoOffset = take.at(now)
+        take.pacer = recordlog.FramePacer(take.videoFps, now)
 
     def _onFrameTick(self):
-        segment = self.segment
-        if not self.videoOn or segment is None:
+        take = self.takes.get(VIDEO)
+        if not self.videoOn or take is None:
             return
         now = time.monotonic()
         try:
-            if segment.writer is None:
+            if take.writer is None:
                 image = grabViews(self.videoSource)
                 if image is None:
                     return
-                self._openVideo(segment, image, now)
-            due = segment.pacer.due(now)
+                self._openVideo(take, image, now)
+            due = take.pacer.due(now)
             if due <= 0:
                 return
-            if segment.writer.broken:
-                raise RuntimeError(segment.writer.error or "the video encoder stopped")
+            if take.writer.broken:
+                raise RuntimeError(take.writer.error or "the video encoder stopped")
             # In the middle of a load, a recount or a save Slicer shows the wait
             # cursor and the views may be half updated: repeat the last picture.
-            busy = qt.QApplication.overrideCursor() is not None and segment.lastFrame is not None
+            busy = qt.QApplication.overrideCursor() is not None and take.lastFrame is not None
             image = None if busy else grabViews(self.videoSource)
-            if image is None and segment.lastFrame is None:
+            if image is None and take.lastFrame is None:
                 return
             if image is not None:
-                if due > 1 and segment.lastFrame is not None:
+                if due > 1 and take.lastFrame is not None:
                     # Slicer was frozen: what was on screen then is the old
                     # picture, and only the newest frame shows the new one
-                    segment.writer.push(segment.lastFrame, due - 1)
-                    segment.pacer.mark(due - 1)
+                    take.writer.push(take.lastFrame, due - 1)
+                    take.pacer.mark(due - 1)
                     due = 1
-                canvas = composeFrame(image, segment.videoSize,
-                                      "REC " + recordlog.format_clock(segment.at(now)), *self.banner)
-                segment.lastFrame = bytes(canvas.constBits()) if segment.videoKind == "mp4" else canvas
-            segment.writer.push(segment.lastFrame, due)
-            segment.pacer.mark(due)
+                canvas = composeFrame(image, take.videoSize,
+                                      "REC " + recordlog.format_clock(take.at(now)), *self.banner)
+                take.lastFrame = bytes(canvas.constBits())
+            take.writer.push(take.lastFrame, due)
+            take.pacer.mark(due)
         except Exception as error:  # noqa: BLE001 - never let a frame take Slicer down
             logging.exception("GTReview: video frame failed")
             self.stopVideo()
             self._onWarning("Video recording stopped: {}".format(error))
 
-    # ------------------------------------------------------------- segments
-    def _ensureSegment(self, rollIf):
-        """The open segment, or a new one for the case on screen.  A segment
-        that already had this kind of recording is closed and a new one opened,
-        so restarting a stream never needs a second file in one segment."""
-        if self.segment is not None and getattr(self.segment, rollIf):
-            self._roll()
-        if self.segment is None:
-            self.segment = self._openSegment()
-        return self.segment
-
-    def _openSegment(self):
+    # ---------------------------------------------------------------- takes
+    def _caseContext(self):
         context = self._context()
         if not context:
             raise RuntimeError("Load a case first: recordings are kept per case.")
-        folder = os.path.join(recordingsFolder(context["batch_dir"]), recordlog.safe_name(context["case_id"]))
+        return context
+
+    def _mayReplace(self, context, kinds, switching):
+        """True unless the case has recordings of *kinds* and the reader
+        chose to keep them."""
+        existing = [kind for kind in kinds if self.hasRecording(context, kind)]
+        if not existing:
+            return True
+        return bool(self._confirmReplace(context["case_id"], existing, switching))
+
+    def _openTake(self, kind, context, source=""):
+        """A new take of *kind* for the case of *context*, recording at once."""
+        root = recordingsFolder(context["batch_dir"])
+        folder = os.path.join(root, kind)
         os.makedirs(folder, exist_ok=True)
         now = datetime.datetime.now()
-        stem = recordlog.unique_stem(
-            folder, recordlog.segment_stem(context["case_id"], now),
-            (".json", ".wav", "_mic.wav", ".mp4", "_video.mp4", ".ogv"),
-        )
+        stem = recordlog.unique_stem(folder, recordlog.take_stem(context["case_id"], now), WORKING_SUFFIXES)
         meta = dict(context)
-        meta["started"] = now.isoformat(timespec="seconds")
-        meta["reader"] = _reader()
-        segment = Segment(folder, stem, meta, time.monotonic())
-        self.lastFolder = folder
-        self.segment = segment
-        segment.log.add(0.0, "recording_started")
-        self._onSegment()
-        return segment
+        meta.update(kind=kind, started=now.isoformat(timespec="seconds"), reader=_reader())
+        start = time.monotonic()
+        take = Take(kind, folder, recordlog.safe_name(context["case_id"]), stem, meta, start)
+        if self.mic.active and not self.testing and self._micLost is None:
+            take.wav = wavfile.WavWriter(take.working(".recording.wav"), self.mic.rate, self.mic.channels)
+            # audio captured before this moment that the system has not handed
+            # over yet -- WinMM keeps a block of a second -- starts the file,
+            # so it starts that much before the take
+            pending = max(0.0, self._clock.shortfall(start, self._bytes // (2 * self.mic.channels))) \
+                if self._clock is not None else 0.0
+            take.audioOffset = -pending
+            take.audioDevice = self.mic.label
+        if kind == VIDEO:
+            take.videoSource = source or ""
+        self.takes[kind] = take
+        self.lastFolder = root
+        take.log.add(0.0, "recording_started", media=kind)
+        if take.wav is not None:
+            take.log.add(0.0, "audio_started", device=self.mic.label, rate=self.mic.rate,
+                         channels=self.mic.channels)
+        if kind == VIDEO:
+            take.log.add(0.0, "video_started", source=take.videoSource or "all views",
+                         sound=take.wav is not None)
+        self._onTake(take)
+        return take
 
-    def _roll(self):
-        """Close the open segment and open the next one for the same case,
-        carrying on whatever is recording."""
-        self._closeSegment(reopen=True)
-
-    def _dropIfIdle(self):
-        """Forget a segment opened for a stream that then failed to start, when
-        nothing else records into it: it holds no media, so no files."""
-        segment = self.segment
-        if segment is None or self.recording:
-            return
-        self.segment = None
-        try:
-            os.rmdir(segment.folder)  # only if this left it empty
-        except OSError:
-            pass
+    def _closeTakes(self, kinds, reason=None):
+        """End and save the open takes of *kinds*.  Each stands alone: a
+        microphone or a disk that fails here never leaves one half closed."""
+        if self.mic.active and not self.testing and self._micLost is None:
+            try:
+                self.mic.drain()
+            except Exception:  # noqa: BLE001
+                logging.exception("GTReview: reading the last of the microphone failed")
+        now = time.monotonic()
+        for kind in kinds:
+            take = self.takes.pop(kind, None)
+            if take is None:
+                continue
+            try:
+                if reason:
+                    take.log.add(take.at(now), reason)
+                self._closeWav(take)
+                take.end = take.at(now)
+                take.log.add(take.end, "recording_ended")
+            finally:
+                self._finish(take)
 
     def caseChanged(self):
-        """The case on screen changed: its predecessor's segment is finished and,
-        while anything records, a new one opens for this case."""
-        if self.segment is None:
+        """The case on screen changed: the takes of the one before are saved
+        and new ones start for this case -- after asking, when it has
+        recordings they would replace.  A reload of the same case (Reset,
+        another mask) carries on in the same takes."""
+        if not self.takes:
             return
         context = self._context()
         if context is None:
             self.stopAll()
             self._onWarning("Recording stopped: no case is open.")
             return
-        self._closeSegment(reopen=self.recording)
-
-    def _closeSegment(self, reopen):
-        """Finish the open segment and, with *reopen*, start the next one for
-        the case on screen.  Each step stands alone: a microphone or a disk
-        that fails here never leaves a segment half closed."""
-        segment = self.segment
-        if segment is None:
+        meta = next(iter(self.takes.values())).log.meta
+        if (meta.get("case_dir"), meta.get("batch_dir")) == (context.get("case_dir"), context.get("batch_dir")):
+            self.note("case_reloaded", mask_file=context.get("mask_file"))
             return
-        now = time.monotonic()
-        if self.audioOn:
-            try:
-                self.mic.drain()
-            except Exception:  # noqa: BLE001
-                logging.exception("GTReview: reading the last of the microphone failed")
-        # audio captured before this moment that the system has not handed
-        # over yet -- WinMM keeps a block of a second -- lands in the next file
-        pending = max(0.0, self._clock.shortfall(now, self._frames)) if self._clock else 0.0
-        self._closeWav(segment)
-        if segment.writer is not None and segment.videoKind == "ogv":
-            try:
-                segment.writer.close()
-            except Exception:  # noqa: BLE001
-                logging.exception("GTReview: finishing the Theora video failed")
-        segment.end = segment.at(now)
-        segment.log.add(segment.end, "recording_ended")
-        self.segment = None
-        self._finish(segment)
-        if not reopen:
+        kinds = list(self.takes)
+        self._closeTakes(kinds)
+        if not self._mayReplace(context, kinds, switching=True):
+            self.stopAll()
             return
         try:
-            fresh = self._openSegment()
-            if self.audioOn and self._writeError is None:
-                fresh.wav = wavfile.WavWriter(fresh.path("_mic.wav"), self.mic.rate, self.mic.channels)
+            for kind in kinds:
+                self._openTake(kind, context, self.videoSource)
         except Exception as error:  # noqa: BLE001
             self.stopAll()
             self._onWarning("Recording stopped: {}".format(error))
             return
-        if fresh.wav is not None:
-            # the file starts with that pending audio: before the segment does
-            fresh.audioOffset = (now - pending) - fresh.start
-            fresh.audioDevice = self.mic.label
-            fresh.hadAudio = True
-            fresh.log.add(0.0, "audio_started", device=self.mic.label, rate=self.mic.rate,
-                          channels=self.mic.channels)
-        if self.videoOn:
-            fresh.videoSource = self.videoSource
-            fresh.hadVideo = True
-            fresh.log.add(0.0, "video_started", source=self.videoSource or "all views")
+        self.lastSaved = []
         self._onChange()
 
-    def _finish(self, segment):
-        thread = threading.Thread(target=self._finishQuietly, args=(segment,),
-                                  name="GTReview finish {}".format(segment.stem), daemon=True)
+    # ------------------------------------------------------------- saving
+    def _finish(self, take):
+        """Save *take* in a thread, after the takes before it, so a case's
+        newest take is always the one that ends up its recording."""
+        with self._pendingLock:
+            self._pending[take.target] = self._pending.get(take.target, 0) + 1
+        previous = self._finishing[-1] if self._finishing else None
+        thread = threading.Thread(target=self._finishQuietly, args=(take, previous),
+                                  name="GTReview saving {}".format(take.stem), daemon=True)
         thread.start()
         self._finishing.append(thread)
+        if not self._valveTimer.isActive():
+            self._valveTimer.start()
 
-    @staticmethod
-    def _finishQuietly(segment):
+    def _finishQuietly(self, take, previous):
+        written, problem = [], None
         try:
-            finishSegment(segment)
-        except Exception:  # noqa: BLE001 - logged; the raw files stay
-            logging.exception("GTReview: finishing recording %s failed", segment.stem)
+            if previous is not None:
+                previous.join()
+            written, problem = finishTake(take)
+        except Exception as error:  # noqa: BLE001 - logged; the take's files stay
+            logging.exception("GTReview: saving %s failed", take.stem)
+            problem = "The {} recording of {} could not be saved ({}).".format(take.kind, take.name, error)
+        finally:
+            with self._pendingLock:
+                left = self._pending.get(take.target, 1) - 1
+                if left > 0:
+                    self._pending[take.target] = left
+                else:
+                    self._pending.pop(take.target, None)
+            self._results.put((written, problem))
 
+    def _onValve(self):
+        """While a take is saved: hand the GIL to the saving thread (see
+        GIL_VALVE_MS), and tell the panel what was saved."""
+        try:
+            busy = self.busyFinishing()
+            self._report()
+            if busy:
+                time.sleep(GIL_VALVE_SLEEP_S)
+            else:
+                self._valveTimer.stop()
+        except Exception:  # noqa: BLE001 - a timer callback must never raise
+            logging.exception("GTReview: the saving timer failed")
+
+    def _report(self):
+        changed = False
+        while True:
+            try:
+                written, problem = self._results.get_nowait()
+            except queue.Empty:
+                break
+            changed = True
+            # everything saved since the switches were last turned on
+            self.lastSaved += [path for path in written if path not in self.lastSaved]
+            if problem:
+                self._onWarning(problem)
+        if changed:
+            self._onChange()
+
+    # ---------------------------------------------------------- lifecycle
     def _started(self):
         if not self._clockTimer.isActive():
             self._clockTimer.start()
@@ -1255,31 +1442,29 @@ class Recorder:
 
     def _stoppedOne(self):
         if not self.recording:
-            self._closeSegment(reopen=False)
             self._clockTimer.stop()
         self._onChange()
 
     def stopAll(self):
-        """Stop everything and finish the files.  Never raises: it runs as a
+        """Stop everything and save the takes.  Never raises: it runs as a
         scene closes and as Slicer exits."""
         try:
             self.stopTest()
         except Exception:  # noqa: BLE001
             logging.exception("GTReview: stopping the microphone test failed")
-        if self.audioOn:
+        self._frameTimer.stop()
+        self.audioOn = self.videoOn = False
+        try:
+            self._closeTakes(list(self.takes))
+        except Exception:  # noqa: BLE001
+            logging.exception("GTReview: saving the recording failed")
+            self.takes = {}
+        if self.mic.active:
             try:
                 self.mic.stop()
             except Exception:  # noqa: BLE001
                 logging.exception("GTReview: stopping the microphone failed")
-            self.audioOn = False
-        if self.videoOn:
-            self._frameTimer.stop()
-            self.videoOn = False
-        try:
-            self._closeSegment(reopen=False)
-        except Exception:  # noqa: BLE001
-            logging.exception("GTReview: finishing the recording failed")
-            self.segment = None
+        self._clock = None
         self._clockTimer.stop()
         self._onChange()
 
@@ -1289,6 +1474,7 @@ class Recorder:
         deadline = time.monotonic() + float(wait)
         for thread in list(self._finishing):
             thread.join(max(0.0, deadline - time.monotonic()))
+        self._valveTimer.stop()
         return self.busyFinishing() == 0
 
     # ---------------------------------------------------------------- clock
@@ -1304,15 +1490,14 @@ class Recorder:
         # microphone owes nothing for that: audio held meanwhile arrives late.
         running = self._lastTick is not None and now - self._lastTick < 1.0
         self._lastTick = now
-        if self.audioOn:
+        if self.capturing and self._micLost is None:
             self.mic.drain()
             self._quiet = self._quiet + 0.5 if running and now - (self.mic.lastData or now) > 0.5 else 0.0
             if self.mic.gone():
-                self._microphoneGone()  # in case nothing was delivered since
+                self._microphoneLost(  # in case nothing was delivered since
+                    "The microphone {} was disconnected.".format(self.mic.label))
             elif self.mic.failed() or self._quiet >= QUIET_SECONDS:
-                self.stopAudio()
-                self._onWarning("The microphone stopped delivering audio (unplugged?), so its "
-                                "recording was stopped; what it recorded until then is kept.")
+                self._microphoneLost("The microphone stopped delivering audio (unplugged?).")
             elif (not self._silenceWarned and not self.mic.heardSomething
                     and now - (self.mic.started or now) > SILENCE_WARNING_SECONDS):
                 self._silenceWarned = True

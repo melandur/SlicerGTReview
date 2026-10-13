@@ -245,13 +245,15 @@
       <div>
         <h3 class="recording">Recording · what you say and see</h3>
         <ul>
-          <li><b>Record microphone</b> / <b>Record video</b>: two switches, use either or both. While one is on, a
-            red <b>● REC</b> shows in Slicer's status bar and the time runs next to the buttons. Press again to stop.</li>
+          <li><b>Record microphone</b> / <b>Record video</b>: two switches, use either or both; the video records
+            the microphone as its sound. While one is on, a red <b>● REC</b> shows in Slicer's status bar and the
+            time runs next to the buttons. Press again to stop.</li>
           <li><b>Microphone</b>: pick your input; <i>System default</i> follows the system. Press <b>Test</b> and
             speak: the bar underneath must move. Plugged one in? Press the refresh button.</li>
           <li><b>Video</b>: <i>All views</i>, every sequence as laid out, or a single slice view.</li>
-          <li>Recordings are kept <b>per case</b> in <code>GTReview-recordings/&lt;case&gt;</code> inside the batch
-            folder; <b>Next &gt;</b> or <b>Save &amp; next case</b> starts the next case's files by itself.
+          <li>Each case keeps <b>one recording of each kind</b>, in <code>GTReview-recordings/microphone</code> and
+            <code>/video</code> inside the batch folder; <b>Next &gt;</b> or <b>Save &amp; next case</b> starts the
+            next case's by itself. A case that already has one is asked about first: <i>Replace</i> or keep it.
             <b>Open folder</b> shows them.</li>
         </ul>
       </div>
@@ -265,14 +267,14 @@
 
     <h3>What you get, per case</h3>
     <ul>
-      <li><code>&lt;case&gt;_&lt;date-time&gt;.wav</code>: your voice, with a short chime and a spoken
+      <li><code>microphone/&lt;case&gt;.wav</code>: your voice, with a short chime and a spoken
         <i>“lesion three”</i> wherever you moved to another lesion; paging quickly through the list announces only
-        the lesion you stop on. <code>…_mic.wav</code> is your voice untouched.</li>
-      <li><code>….mp4</code>: the video, carrying that audio and one chapter per lesion. Without ffmpeg it is an
-        <code>.ogv</code> at 5 frames a second; <b>Get ffmpeg…</b> downloads ffmpeg into Slicer once (about 30&nbsp;MB).</li>
-      <li><code>….srt</code>: the lesion as subtitles; VLC and mpv show them by themselves.</li>
-      <li><code>….json</code>: every switch with the lesion's voxel. Lesion numbers change when lesions are deleted
-        or grow; the voxel finds the same lesion again, in the original mask and in your review.</li>
+        the lesion you stop on.</li>
+      <li><code>video/&lt;case&gt;.mp4</code>: the video, with that same sound and one chapter per lesion. It needs
+        ffmpeg: <b>Get ffmpeg…</b> downloads it into Slicer once (about 30&nbsp;MB).</li>
+      <li><code>&lt;case&gt;.json</code> next to each: every switch with the lesion's voxel. Lesion numbers change
+        when lesions are deleted or grow; the voxel finds the same lesion again, in the original mask and in your
+        review.</li>
     </ul>
     <div class="note">
       <b>macOS</b>: Slicer as downloaded may not use the microphone, so the recording comes out silent; GTReview

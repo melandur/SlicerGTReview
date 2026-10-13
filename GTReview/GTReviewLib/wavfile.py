@@ -3,18 +3,17 @@
 The microphone track is written as it is captured by :class:`WavWriter`, which
 rewrites the two sizes in the header every couple of seconds: if Slicer dies
 mid-recording, the file on disk is still a WAV that plays up to the last few
-seconds.  Once a segment is over, :func:`append_cue_points` adds a marker per
-lesion change (ffmpeg, and players built on it such as mpv, show them as
-chapters) and :func:`narrate` builds the copy meant for listening, with a
-short chime and a spoken "lesion three" mixed in wherever the reader moved to
-another lesion.
+seconds.  Once a take is over, :func:`narrate` builds the recording meant for
+listening, with a short chime and a spoken "lesion three" mixed in wherever
+the reader moved to another lesion, and :func:`append_cue_points` adds a
+marker per lesion change (ffmpeg, and players built on it such as mpv, show
+them as chapters).
 
 The voice comes from clips in ``Resources/GTReviewVoice`` -- whole phrases
 ("lesion 7") and single words -- strung together by :func:`phrase`; the
-reader's voice is turned down while an announcement plays, never cut, and the
-untouched microphone file stays next to the narrated one.  The clips are
-8-bit G.711 mu-law, which keeps a hundred phrases near a megabyte; recordings
-are 16-bit PCM.
+reader's voice is turned down while an announcement plays, never cut.  The
+clips are 8-bit G.711 mu-law, which keeps a hundred phrases near a megabyte;
+recordings are 16-bit PCM.
 
 Nothing here imports ``slicer`` or ``qt``.
 """

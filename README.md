@@ -102,12 +102,12 @@ puts the new ones into it.
   records what GTReview did and what went wrong, ready to send with a problem
   report (see *Log file* below).
 - **Recording** — two optional switches, *Record microphone* and *Record
-  video*, on top of the unchanged review. Recordings are kept per case in
-  `GTReview-recordings/` in the batch directory. Every switch to another
-  lesion is logged with a voxel inside the lesion, spoken into a narrated copy
-  of the microphone track ("lesion three"), and shown in a banner on the video
-  of the axial views, so the recording alone tells which lesion was meant (see
-  *Recording* below).
+  video*, on top of the unchanged review. Each case keeps one recording of
+  each kind, in `GTReview-recordings/microphone/` and `video/` in the batch
+  directory. Every switch to another lesion is logged with a voxel inside the
+  lesion, spoken into the recording ("lesion three"), and shown in a banner on
+  the video of the axial views, whose sound is the microphone, so the
+  recording alone tells which lesion was meant (see *Recording* below).
 
 Pure logic — case discovery, connected components, NIfTI geometry-preserving
 read/write — lives in `GTReviewLib/` with **no Slicer imports**, so it is unit
@@ -462,8 +462,9 @@ the problem happened, the last header above the error, rather than the newest.
 
 The *Recording* section adds two switches to the review, which otherwise
 works exactly as before. **Record microphone** records the reader talking
-through the case; **Record video** records the axial views. Either, both, or
-neither; while one runs, a red **● REC** sits in Slicer's status bar.
+through the case; **Record video** records the axial views, with the
+microphone as its sound. Either, both, or neither; while one runs, a red
+**● REC** sits in Slicer's status bar.
 
 ### What the recording says about the lesion
 
@@ -483,23 +484,30 @@ changes, and anything lost from the microphone.
 
 ### Files
 
-Per case, in `<batch>/GTReview-recordings/<case_id>/`, every file of one
-recording sharing the stem `<case_id>_<YYYYMMDD-HHMMSS>`:
+Each case keeps one recording of each kind, in `GTReview-recordings/` in the
+batch directory:
 
 | File | What |
 | --- | --- |
-| `<stem>.wav` | the narrated recording, for listening: a short chime and a spoken "lesion three" wherever the reader moved to another lesion ("new lesion four" for one just painted, "now lesion two" when a recount renumbered the one selected). The reader's voice is turned down under the announcement, never cut. Paging quickly through the list announces only the lesion stopped on. |
-| `<stem>_mic.wav` | the microphone as captured, untouched, for transcription. Written as it arrives, with its header kept current, so a crash leaves a playable file. |
-| `<stem>.srt` | the active lesion as subtitles, which VLC and mpv load next to the video and the audio: timed to the video when there is one. When the microphone started at another moment than the video, the audio has its own, `<stem>_audio.srt`. |
-| `<stem>_labels.txt` | the same as an Audacity label track (*File › Import › Labels*). |
-| `<stem>.mp4` | the video with ffmpeg: H.264 at 10 frames a second, the narrated audio, and one chapter per lesion. |
-| `<stem>.ogv` | the video without ffmpeg: Theora at 5 frames a second, from VTK's own encoder (VLC and mpv play it). |
-| `<stem>.json` | every event in order with its time, the lesion's number, label, size, seed voxel (IJK and RAS) and bounding box, plus the case, the mask, its geometry, the reader's login, and where each media file starts on the recording's clock. |
+| `microphone/<case_id>.wav` | the microphone, for listening: a short chime and a spoken "lesion three" wherever the reader moved to another lesion ("new lesion four" for one just painted, "now lesion two" when a recount renumbered the one selected). The reader's voice is turned down under the announcement, never cut. Paging quickly through the list announces only the lesion stopped on. A cue point marks every lesion change (ffmpeg and mpv show them as chapters). |
+| `video/<case_id>.mp4` | the views (see *Video*): H.264 at 10 frames a second, with the same narrated microphone as its sound and one chapter per lesion. |
+| `<case_id>.json`, next to each | every event in order with its time, the lesion's number, label, size, seed voxel (IJK and RAS) and bounding box, plus the case, the mask, its geometry, the reader's login, and where the sound and the picture start on the recording's clock. |
 
-Both WAV files also carry a cue point per lesion change (ffmpeg and mpv show
-them as chapters). Moving to another case closes the files of the one left
-and starts the next case's, without a gap. When the batch folder cannot be
-written, recordings go to `~/GTReview-recordings/<batch name>/` instead.
+Recording a case that already has a recording of that kind asks first:
+*Replace* records a new one, which takes the old one's place once it is saved
+(until then the old one stays), and *Keep it* leaves it alone. Moving on to a
+recorded case while recording asks the same, with *Stop recording* in place of
+*Keep it*. Moving to another case saves the one left and starts the next
+case's without a gap; reloading the same case (*Reset*, another mask) carries
+on in the same recording.
+
+While it runs, a recording is written as it comes in, to
+`<case_id>_<YYYYMMDD-HHMMSS>.recording.wav` (and `.recording.mp4`) next to its
+final place, so a crash leaves a playable file. Once stopped it is saved as
+`<case_id>.wav` / `.mp4` within seconds: the panel says *Saving the recording
+…*, then what it saved. *Open folder* shows `GTReview-recordings`. When the
+batch folder cannot be written, recordings go to
+`~/GTReview-recordings/<batch name>/` instead.
 
 ### Video
 
@@ -507,6 +515,10 @@ The video shows the view area as laid out (*All views*: every sequence side by
 side in *Sequences (axial)*), or one slice view with its slider bar, chosen in
 the *Video* box and changeable while recording. A banner above the views names
 the case and the active lesion with its number, label, size and seed voxel.
+Its sound is the microphone picked under *Microphone*, with the lesions
+announced as in the microphone recording, also while *Record microphone* is
+off; without a working microphone the video records without sound, and says
+so.
 
 The picture is rendered from Slicer's own views, not read off the screen, so
 no screen-recording permission is involved, and windows on top of Slicer, a
@@ -514,16 +526,19 @@ second monitor or Wayland make no difference. When Slicer is busy (a case
 loading, a recount) the last picture repeats, so the video always runs as long
 as the clock did and stays in step with the audio and the events.
 
-ffmpeg is looked for where Slicer's Screen Capture module keeps it (the same
-setting), then in the `imageio-ffmpeg` Python package, then on the `PATH`.
-*Get ffmpeg…* installs `imageio-ffmpeg` from PyPI into Slicer (about 30 MB)
-after asking. ffmpeg is GPL software; GTReview does not ship it.
+The video needs ffmpeg, which puts the sound into it. ffmpeg is looked for
+where Slicer's Screen Capture module keeps it (the same setting), then in the
+`imageio-ffmpeg` Python package, then on the `PATH`. *Get ffmpeg…*, and
+*Record video* when there is none, install `imageio-ffmpeg` from PyPI into
+Slicer (about 30 MB) after asking. ffmpeg is GPL software; GTReview does not
+ship it.
 
 ### Microphone
 
 Pick the input in *Microphone* (*System default* follows the system), press
 the refresh button after plugging one in, and *Test* it: the level bar should
-move while you speak. The choice is remembered.
+move while you speak. The choice is remembered, and is the video's microphone
+too; it cannot change while either switch records.
 
 Capture goes through Qt Multimedia, which Slicer ships, and its audio moves on
 Slicer's main thread: while Slicer is busy the sound system holds the samples.
@@ -536,13 +551,14 @@ hold well under a second) is padded with silence once the shortfall settles,
 so the rest of the recording stays in step, and logged as `audio_gap`.
 
 A microphone picked by name that is unplugged mid-recording stops the
-microphone recording with a warning; what it recorded is kept. Left alone,
-PulseAudio and PipeWire would move the recording to the default input without
-a word, and the narration would carry on from another microphone. With
-*System default* picked, the recording follows the default instead. A
-microphone that stops delivering anything is stopped the same way, and so is
-one whose file cannot be written (a full disk, a share gone); the video, if
-any, goes on, and the event log is written whatever else fails.
+microphone recording with a warning; what it recorded is kept, and a video
+goes on without sound. Left alone, PulseAudio and PipeWire would move the
+recording to the default input without a word, and the narration would carry
+on from another microphone. With *System default* picked, the recording
+follows the default instead. A microphone that stops delivering anything is
+stopped the same way. A recording file that cannot be written (a full disk, a
+share gone) stops the whole recording, keeping what reached the disk; the
+event log is written whatever else fails.
 
 - **macOS.** Slicer as downloaded carries neither the microphone usage
   description nor the audio-input entitlement macOS requires of a signed app,
@@ -661,10 +677,13 @@ stand-in delivers a hum at the clock's pace, and can hold audio through a
 freeze and deliver it late, or drop it. It records the views for real while
 lesions are selected, deleted and renumbered by Undo, through two freezes and
 a case switch. It then checks every file: cue points, an announcement per
-lesion settled on, seed voxels inside the lesions they name, audio and video
-as long as the clock ran, chapters, the banner, the Theora fallback, a
-microphone that fails to open and one that gives only silence. On a machine
-without a display, `xvfb-run -a` in front of it works:
+lesion settled on and heard in the video's sound too, seed voxels inside the
+lesions they name, audio and video as long as the clock ran, chapters, the
+banner; one recording per case and the questions before one is replaced; a
+microphone that fails to open, one unplugged, one that gives only silence;
+*Open folder*; and that a recording is saved within seconds while Slicer
+idles. It needs ffmpeg and ffprobe. On a machine without a display,
+`xvfb-run -a` in front of it works:
 
 ```bash
 $SLICER/Slicer --no-splash \

@@ -11,10 +11,10 @@ selection and the Done ticks across renumbering, and because the reviewed mask
 keeps the source voxel grid, the lesion it points at can be found again in the
 original mask and in the reviewed one.
 
-This module turns the events into what goes next to the media files: the JSON
-event log, subtitles (SRT), an Audacity label track, ffmpeg chapter metadata,
-WAV cue points and the schedule of spoken announcements ("lesion three"),
-plus the small clocks that keep audio and video in real time.
+This module turns the events into what goes into and next to the media files:
+the JSON event log, the video's chapters (ffmpeg metadata), the WAV cue points
+and the schedule of spoken announcements ("lesion three"), plus the small
+clocks that keep audio and video in real time.
 
 Nothing here imports ``slicer``, ``qt`` or ``numpy``.
 """
@@ -27,7 +27,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 #: written into every event log, so a reader can tell the layout apart later
 FORMAT_NAME = "GTReview recording"
-FORMAT_VERSION = 1
+#: 2: one take per case and kind (``kind``: microphone / video), the media
+#: file named in ``file``
+FORMAT_VERSION = 2
 
 # --------------------------------------------------------------------------- #
 # event types
@@ -166,10 +168,10 @@ def _rounded(value):
 
 
 class EventLog:
-    """Timestamped events of one recording segment (one case).
+    """Timestamped events of one take: one case, one kind of recording.
 
-    ``t`` is seconds since the segment started; :attr:`meta` says where each
-    media file starts on that clock (``audio.offset``, ``video.offset``).
+    ``t`` is seconds since the take started; :attr:`meta` says where each
+    media stream starts on that clock (``audio.offset``, ``video.offset``).
     """
 
     def __init__(self, meta: Optional[Dict] = None):
@@ -195,7 +197,7 @@ class EventLog:
 
 
 def lesion_text(event: Dict) -> str:
-    """One line for a lesion state: subtitles, labels, chapters, banner."""
+    """One line for a lesion state: cue points, chapters, the video banner."""
     kind = event.get("type")
     if kind == LESION_CLEARED or event.get("number") is None:
         return "No lesion selected"
@@ -213,25 +215,9 @@ def lesion_text(event: Dict) -> str:
     return text
 
 
-def event_text(event: Dict) -> str:
-    """A short description of any event, for the Audacity label track."""
-    kind = event.get("type")
-    if kind in LESION_STATE_EVENTS:
-        return lesion_text(event)
-    if kind == LESION_REVISITED:
-        return "Lesion #{} again".format(event.get("number"))
-    if kind == "lesion_deleted":
-        return "Lesion #{} deleted".format(event.get("number"))
-    if kind == "audio_gap":
-        return "Audio lost: {:.1f} s of silence inserted".format(float(event.get("seconds", 0.0)))
-    words = str(kind).replace("_", " ")
-    detail = event.get("detail")
-    return "{}: {}".format(words, detail) if detail else words.capitalize()
-
-
 def lesion_intervals(events: Sequence[Dict], end: float) -> List[Tuple[float, float, str]]:
     """``(start, end, text)`` for each stretch with one lesion state, on the
-    segment clock, from 0 to *end*.  The stretch before the first lesion event
+    take's clock, from 0 to *end*.  The stretch before the first lesion event
     reads "No lesion selected"."""
     marks = [(0.0, "No lesion selected")]
     for event in events:
@@ -258,48 +244,12 @@ def _shifted(intervals, offset, duration=None):
     return out
 
 
-def format_srt_time(seconds: float) -> str:
-    millis = int(round(max(0.0, seconds) * 1000.0))
-    hours, millis = divmod(millis, 3600000)
-    minutes, millis = divmod(millis, 60000)
-    secs, millis = divmod(millis, 1000)
-    return "{:02d}:{:02d}:{:02d},{:03d}".format(hours, minutes, secs, millis)
-
-
 def format_clock(seconds: float) -> str:
     """``H:MM:SS`` under ten hours, for the banner and the panel."""
     seconds = int(max(0.0, seconds))
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
     return "{:d}:{:02d}:{:02d}".format(hours, minutes, seconds)
-
-
-def srt(intervals: Sequence[Tuple[float, float, str]], offset: float = 0.0,
-        duration: Optional[float] = None) -> str:
-    """SubRip subtitles for a media file starting *offset* s into the segment."""
-    blocks = []
-    for number, (start, stop, text) in enumerate(_shifted(intervals, offset, duration), 1):
-        blocks.append("{}\n{} --> {}\n{}\n".format(
-            number, format_srt_time(start), format_srt_time(stop), text))
-    return "\n".join(blocks)
-
-
-def audacity_labels(events: Sequence[Dict], end: float, offset: float = 0.0) -> str:
-    """Audacity label track: one region per lesion state, a point per other event.
-
-    Tab-separated ``start end text`` lines in seconds; File > Import > Labels.
-    """
-    lines = []
-    for start, stop, text in _shifted(lesion_intervals(events, end), offset):
-        lines.append((start, stop, text))
-    for event in events:
-        if event.get("type") in LESION_STATE_EVENTS:
-            continue
-        at = float(event["t"]) - offset
-        if at >= 0:
-            lines.append((at, at, event_text(event)))
-    lines.sort(key=lambda line: (line[0], line[1]))
-    return "".join("{:.6f}\t{:.6f}\t{}\n".format(a, b, text) for a, b, text in lines)
 
 
 def ffmetadata(intervals: Sequence[Tuple[float, float, str]], offset: float,
@@ -393,8 +343,9 @@ def safe_name(text: str) -> str:
     return cleaned or "case"
 
 
-def segment_stem(case_id: str, when: datetime.datetime) -> str:
-    """``<case_id>_<YYYYMMDD-HHMMSS>``, the stem every file of a segment shares."""
+def take_stem(case_id: str, when: datetime.datetime) -> str:
+    """``<case_id>_<YYYYMMDD-HHMMSS>``, the stem of a take's files while it
+    runs and is saved (the case's recording itself is ``<case_id>.<ext>``)."""
     return "{}_{}".format(safe_name(case_id), when.strftime("%Y%m%d-%H%M%S"))
 
 

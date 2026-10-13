@@ -10,8 +10,8 @@ No microphone is opened: a stand-in (:class:`FakeMicrophone`) delivers a hum at
 the wall clock's pace from a Qt timer, the way Qt's own audio backends deliver
 on the main thread.  It can hold audio through a freeze and deliver it late (as
 PulseAudio does) or drop it (as CoreAudio and ALSA do).  The video is the real
-thing, rendered from the slice views, encoded by ffmpeg when one is found and
-by VTK's Theora writer when not.
+thing, rendered from the slice views and encoded by ffmpeg, which the test
+needs (as the video does), with ffprobe next to it.
 
 On two synthetic cases (numpy + SimpleITK, never patient data) it
 
@@ -22,20 +22,29 @@ On two synthetic cases (numpy + SimpleITK, never patient data) it
    selected one), while the main thread freezes twice -- once with the audio
    held, once with it dropped -- and across a switch to the next case, where
    the video is pointed at one slice view;
-3. checks what the first case left: the microphone WAV with a cue point per
-   lesion change, the narrated WAV with an announcement per lesion settled on,
-   subtitles, an Audacity label track, the event log with a seed voxel inside
-   the lesion each event names (also after the renumbering), audio and video
-   that last as long as the wall clock did through both freezes, and an MP4
-   with the narrated audio, a chapter per lesion stretch and the red-dot
-   banner on frames that change as the reader moves;
-4. checks the second case's segment and the source switch in its log;
-5. records without ffmpeg and gets a Theora .ogv;
-6. starts a microphone that fails to open and checks nothing is left behind,
-   and unplugs one mid-recording and checks the recording stops with a warning
-   and keeps what it had;
-7. records a microphone that delivers only zeros and checks the reader is
-   warned.
+3. checks what the first case left: ``GTReview-recordings/microphone/<case>.wav``
+   with the lesions spoken in and a cue point per lesion change, and
+   ``video/<case>.mp4`` with that same sound, a chapter per lesion stretch and
+   the red-dot banner on frames that change as the reader moves; each with its
+   event log, whose seed voxels lie inside the lesion every event names (also
+   after the renumbering); audio and video as long as the wall clock ran,
+   through both freezes; and nothing else in the folders;
+4. checks the second case's takes and the view switch in the video's log;
+5. stops the microphone before the video: the video keeps its sound;
+6. without ffmpeg the video does not start, and ffmpeg is offered;
+7. a microphone that fails to open: the microphone switch goes back off and
+   the video records without sound, saying so; one unplugged mid-recording
+   stops the microphone, keeps what it had and leaves the video running;
+8. a microphone that delivers only zeros is reported;
+9. high-DPI grabs, a lesion selected before Record (announced at the start),
+   a disk that fails mid-recording, the frames owed for a freeze;
+10. one recording per case: recording a recorded case asks first; "keep it"
+    leaves it alone, "replace" replaces it -- with the newest take even while
+    the one before is still being saved; moving on to a recorded case while
+    recording asks too, and "stop recording" stops; a reload of the case goes
+    on in the same take;
+11. Open folder starts the file manager without Slicer's library paths;
+12. a take is saved within seconds while Slicer idles in its event loop.
 
 Not named ``test_*`` so the unit-test discovery leaves it alone.  Set
 GTREVIEW_KEEP_RECORDINGS=1 to keep the temporary batch and its recordings.
@@ -47,6 +56,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import unittest
@@ -65,6 +75,7 @@ if _MODULE_DIR not in sys.path:
 import GTReview as gtreview  # noqa: E402
 from GTReviewLib import recordlog, recording, wavfile  # noqa: E402
 
+MICROPHONE, VIDEO = recording.MICROPHONE, recording.VIDEO
 SIZE = (40, 40, 12)
 SPACING = (1.0, 1.0, 3.0)
 ORIGIN = (-20.0, -20.0, -18.0)
@@ -75,6 +86,8 @@ BLOCK_B = (slice(26, 31), slice(4, 9), slice(3, 6))     # 75 voxels, label 1
 BLOCK_C = (slice(26, 30), slice(28, 32), slice(6, 9))   # 48 voxels, label 3
 CASE_ONE, CASE_TWO = "RC_001", "RC_002"
 SEQUENCES = ("t1", "t1c", "t2", "flair")
+#: the fake microphone's hum
+HUM_HZ, HUM_LEVEL = 220.0, 3000.0
 
 
 class Checks(object):
@@ -197,8 +210,8 @@ class FakeMicrophone(object):
             owed = kept
             self.dropNextFreeze = False
         t = np.arange(self._produced, self._produced + owed) / float(self.rate)
-        level = 0.0 if self.silent else 3000.0
-        samples = (np.sin(2 * np.pi * 220.0 * t) * level).astype("<i2")
+        level = 0.0 if self.silent else HUM_LEVEL
+        samples = (np.sin(2 * np.pi * HUM_HZ * t) * level).astype("<i2")
         self._produced += owed
         if np.any(samples):
             self.heardSomething = True
@@ -215,18 +228,14 @@ class FakeMicrophone(object):
 
 
 def ffprobe(path, entries, section="stream"):
-    exe = shutil.which("ffprobe")
-    if exe is None:
-        return None
-    out = subprocess.run([exe, "-v", "error", "-show_entries", "{}={}".format(section, entries),
-                          "-of", "json", path], capture_output=True, text=True,
-                         env=recording._environment())
+    out = subprocess.run([shutil.which("ffprobe"), "-v", "error", "-show_entries",
+                          "{}={}".format(section, entries), "-of", "json", path],
+                         capture_output=True, text=True, env=recording._environment())
     return json.loads(out.stdout or "{}")
 
 
 def chapters(path):
-    exe = shutil.which("ffprobe")
-    out = subprocess.run([exe, "-v", "error", "-show_chapters", "-of", "json", path],
+    out = subprocess.run([shutil.which("ffprobe"), "-v", "error", "-show_chapters", "-of", "json", path],
                          capture_output=True, text=True, env=recording._environment())
     return json.loads(out.stdout or "{}").get("chapters", [])
 
@@ -238,10 +247,36 @@ def frameAt(video, seconds, png):
     return qt.QImage(png)
 
 
+def soundOf(video, wav):
+    """The video's sound track, decoded: ``(rate, samples)``."""
+    subprocess.run([recording.findFfmpeg()[0], "-v", "error", "-y", "-i", video, "-vn", "-ac", "1",
+                    "-ar", "16000", "-c:a", "pcm_s16le", wav], env=recording._environment(), check=True)
+    return wavfile.read_wav(wav)
+
+
+def humResidual(samples, rate, seconds, length=0.8):
+    """RMS of what is left of the audio from *seconds* on once the best-fitting
+    hum is taken out: about nothing where only the fake microphone is heard,
+    a lot where a voice was mixed in."""
+    start = max(0, int(seconds * rate))
+    x = samples[start:start + int(length * rate), 0].astype(np.float64)
+    if x.size < rate // 10:
+        return 0.0
+    t = (np.arange(x.size) + start) / float(rate)
+    basis = np.stack([np.sin(2 * np.pi * HUM_HZ * t), np.cos(2 * np.pi * HUM_HZ * t), np.ones_like(t)], axis=1)
+    coefficients = np.linalg.lstsq(basis, x, rcond=None)[0]
+    return float(np.sqrt(np.mean((x - basis @ coefficients) ** 2)))
+
+
+def rms(samples):
+    return float(np.sqrt(np.mean(np.square(samples.astype(np.float64))))) if samples.size else 0.0
+
+
 def waitForFiles(widget, timeout=120.0):
     deadline = time.time() + timeout
     while widget.recorder.busyFinishing() and time.time() < deadline:
         pump(0.2)
+    pump(0.1)  # the recorder reports what was saved from the event loop
     return widget.recorder.busyFinishing() == 0
 
 
@@ -249,8 +284,6 @@ class RecordingIntegrationTest(unittest.TestCase):
     root = None
     widget = None
     mask = None
-    started = None
-    caseOneStem = None
 
     @classmethod
     def setUpClass(cls):
@@ -271,6 +304,15 @@ class RecordingIntegrationTest(unittest.TestCase):
         slicer.util.warningDisplay = lambda text, *a, **k: cls.warnings.append(str(text))
         slicer.util.errorDisplay = lambda text, *a, **k: cls.warnings.append(str(text))
         slicer.util.confirmYesNoDisplay = lambda *a, **k: True
+        # "already has a recording -- replace it?": answered from cls.answers
+        # (replace when empty), every question kept in cls.asked
+        cls.asked, cls.answers = [], []
+
+        def confirmReplace(caseId, kinds, switching):
+            cls.asked.append((caseId, tuple(kinds), switching))
+            return cls.answers.pop(0) if cls.answers else True
+
+        cls.widget._confirmReplaceRecording = confirmReplace
 
     @classmethod
     def tearDownClass(cls):
@@ -287,11 +329,36 @@ class RecordingIntegrationTest(unittest.TestCase):
         elif cls.root:
             shutil.rmtree(cls.root, ignore_errors=True)
 
+    # ---------------------------------------------------------------- helpers
     def fake(self, **kwargs):
         widget = self.widget
         mic = FakeMicrophone(widget.recorder._onAudio, widget._onRecorderLevel, **kwargs)
         widget.recorder.mic = mic
         return mic
+
+    def exported(self, kind, case):
+        return recording.recordingPath(os.path.join(self.root, recording.RECORDINGS_FOLDER), kind, case)
+
+    def log(self, kind, case):
+        with open(os.path.splitext(self.exported(kind, case))[0] + ".json", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def seconds(self, kind, case):
+        if kind == MICROPHONE:
+            rate, samples = wavfile.read_wav(self.exported(kind, case))
+            return samples.shape[0] / float(rate)
+        return float(ffprobe(self.exported(kind, case), "duration", section="format")["format"]["duration"])
+
+    def leftovers(self):
+        """Anything in microphone/ and video/ but the cases' recordings and logs."""
+        out = []
+        for kind in (MICROPHONE, VIDEO):
+            folder = os.path.join(self.root, recording.RECORDINGS_FOLDER, kind)
+            for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+                stem, extension = os.path.splitext(name)
+                if extension not in (recording.MEDIA_SUFFIX[kind], ".json") or "." in stem:
+                    out.append("{}/{}".format(kind, name))
+        return out
 
     def selectLesion(self, number):
         table = self.widget.lesionTable
@@ -314,6 +381,8 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(widget.currentCase().case_id == CASE_ONE, "the first case is open")
         CHECKS.check(widget.recordAudioButton.enabled and widget.recordVideoButton.enabled,
                      "both switches are enabled")
+        CHECKS.check("microphone and /video" in widget.recordingStatusLabel.text,
+                     "the panel says where recordings go", widget.recordingStatusLabel.text)
         CHECKS.check(widget.microphoneComboBox.count >= 1
                      and widget.microphoneComboBox.itemText(0) == "System default",
                      "the microphone list starts with the system default",
@@ -334,14 +403,19 @@ class RecordingIntegrationTest(unittest.TestCase):
         widget.recordVideoButton.click()
         pump(0.3)
         recorder = widget.recorder
-        CHECKS.check(recorder.audioOn and recorder.videoOn, "both are recording")
+        CHECKS.check(recorder.audioOn and recorder.videoOn, "both are recording", str(self.warnings))
+        CHECKS.check(not self.asked, "a case without recordings is not asked about", str(self.asked))
         CHECKS.check(widget.recordAudioButton.text == "Stop microphone", "the button says how to stop")
         CHECKS.check(widget._recIndicator is not None and widget._recIndicator.visible,
                      "a REC sign is in the status bar")
-        segment = recorder.segment
-        self.__class__.caseOneStem = segment.path("")
-        CHECKS.check(os.path.isfile(segment.path("_mic.wav")), "the microphone file is being written")
-        self.__class__.started = time.monotonic()
+        micTake, videoTake = recorder.takes.get(MICROPHONE), recorder.takes.get(VIDEO)
+        CHECKS.check(micTake is not None and videoTake is not None, "a take of each kind is open")
+        CHECKS.check(os.path.isfile(micTake.working(".recording.wav")),
+                     "the microphone is written as it comes in")
+        CHECKS.check(videoTake.wav is not None and os.path.isfile(videoTake.working(".recording.wav")),
+                     "the video records the microphone too")
+        CHECKS.check(not widget.microphoneComboBox.enabled and not widget.testMicrophoneButton.enabled,
+                     "the microphone cannot be changed or tested while it records")
         pump(1.2)
         self.selectLesion(1)                      # A
         pump(1.5)
@@ -374,15 +448,16 @@ class RecordingIntegrationTest(unittest.TestCase):
         mic.dropNextFreeze = True
         time.sleep(2.5)
         pump(3.0)
-        self.__class__.caseOneEnd = time.monotonic()
 
         # the delete and the undo left the case "unsaved": no Save / Discard prompt
         widget._confirmDiscardIfNeeded = lambda *args, **kwargs: True
         widget.onNextCase()
         pump(0.8)
         CHECKS.check(widget.currentCase().case_id == CASE_TWO, "the second case is open")
-        CHECKS.check(recorder.segment is not None and CASE_TWO in recorder.segment.stem,
-                     "the recording carried on into the second case's own files")
+        CHECKS.check(set(recorder.takes) == {MICROPHONE, VIDEO}
+                     and all(take.name == CASE_TWO for take in recorder.takes.values()),
+                     "the recording carried on into takes of the second case")
+        CHECKS.check(not self.asked, "it had no recordings, so nothing was asked")
         CHECKS.check(widget.layoutComboBox.itemData(widget.layoutComboBox.currentIndex)
                      == gtreview.SEQUENCES_LAYOUT_ID, "the second case shows its sequences side by side")
         index = widget.videoSourceComboBox.findData("t1c")
@@ -392,38 +467,39 @@ class RecordingIntegrationTest(unittest.TestCase):
         pump(0.5)
         self.selectLesion(1)
         pump(1.5)
-        self.__class__.caseTwoStem = recorder.segment.path("")
         widget.recordAudioButton.click()
         widget.recordVideoButton.click()
         pump(0.2)
-        CHECKS.check(not recorder.recording, "both stopped")
+        CHECKS.check(not recorder.recording and not recorder.capturing, "both stopped, the microphone closed")
         CHECKS.check(widget._recIndicator is None, "the REC sign is gone")
-        CHECKS.check(waitForFiles(widget), "the files were finished")
+        CHECKS.check(waitForFiles(widget), "the files were saved")
+        status = widget.recordingStatusLabel.text.replace("\u2060", "")  # the word joiners
+        CHECKS.check("Saved" in status and "microphone/{}.wav".format(CASE_TWO) in status
+                     and "video/{}.mp4".format(CASE_TWO) in status, "the panel says what was saved", status)
 
     def test_03_first_case_files(self):
         CHECKS.step("What the first case left behind")
-        stem = self.caseOneStem
-        folder = os.path.dirname(stem)
-        CHECKS.check(folder == os.path.join(self.root, recording.RECORDINGS_FOLDER, CASE_ONE),
-                     "recordings sit in GTReview-recordings/<case> in the batch folder", folder)
-        ffmpeg = recording.findFfmpeg()[0]
-        video = stem + (".mp4" if ffmpeg else ".ogv")
-        for suffix in ("_mic.wav", ".wav", ".srt", "_labels.txt", ".json"):
-            CHECKS.check(os.path.isfile(stem + suffix), "{} written".format(os.path.basename(stem + suffix)))
-        CHECKS.check(os.path.isfile(video), "{} written".format(os.path.basename(video)))
-        CHECKS.check(not os.path.exists(stem + "_video.mp4"), "the unmuxed video was cleaned up")
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
+        CHECKS.check(sorted(os.listdir(folder)) == [MICROPHONE, VIDEO],
+                     "GTReview-recordings in the batch folder holds microphone/ and video/",
+                     str(os.listdir(folder)))
+        micPath, videoPath = self.exported(MICROPHONE, CASE_ONE), self.exported(VIDEO, CASE_ONE)
+        for path in (micPath, videoPath):
+            for name in (path, os.path.splitext(path)[0] + ".json"):
+                CHECKS.check(os.path.isfile(name), "{} written".format(os.path.relpath(name, folder)))
+        CHECKS.check(not self.leftovers(), "nothing else is left in the folders", str(self.leftovers()))
 
-        with open(stem + ".json", encoding="utf-8") as handle:
-            log = json.load(handle)
+        log = self.log(MICROPHONE, CASE_ONE)
         events = log["events"]
         kinds = [e["type"] for e in events]
-        for kind in ("recording_started", "case_state", "audio_started", "video_started",
+        for kind in ("recording_started", "case_state", "audio_started",
                      recordlog.LESION_SELECTED, recordlog.LESION_REVISITED, "lesion_deleted",
                      recordlog.LESION_CLEARED, recordlog.LESION_RENUMBERED, "undo", "audio_gap",
                      "recording_ended"):
             CHECKS.check(kind in kinds, "the log has a {} event".format(kind), str(sorted(set(kinds))))
-        CHECKS.check(log["case_id"] == CASE_ONE and log["format"] == recordlog.FORMAT_NAME,
-                     "the log names its case and format")
+        CHECKS.check(log["case_id"] == CASE_ONE and log["format"] == recordlog.FORMAT_NAME
+                     and log["kind"] == MICROPHONE and log["file"] == CASE_ONE + ".wav",
+                     "the log names its case, its kind and its file")
         selected = [e for e in events if e["type"] in recordlog.LESION_STATE_EVENTS and "seed_ijk" in e]
         CHECKS.check(all(blockOf(e["seed_ijk"]) is not None for e in selected),
                      "every logged seed voxel lies inside a lesion of the original mask",
@@ -440,166 +516,203 @@ class RecordingIntegrationTest(unittest.TestCase):
                      and blockOf(renumbered["seed_ijk"]) == "B",
                      "Undo renumbered the selected block B from #1 to #2, and the log says so",
                      str(renumbered))
+        states = [e["type"] for e in events if e["type"] in recordlog.LESION_STATE_EVENTS]
+        CHECKS.check(states[-1] == recordlog.LESION_RENUMBERED,
+                     "it ends with the case's last lesion state, not the next case's loading", str(states[-3:]))
 
-        rate, mic = wavfile.read_wav(stem + "_mic.wav")
-        _rate, narrated = wavfile.read_wav(stem + ".wav")
+        rate, narrated = wavfile.read_wav(micPath)
         audio = log["audio"]
         wall = log["duration"] - audio["offset"]
-        CHECKS.check(abs(mic.shape[0] / float(rate) - wall) < 0.4,
-                     "the microphone track lasts as long as the clock ran, through both freezes",
-                     "{:.2f} s of audio for {:.2f} s".format(mic.shape[0] / float(rate), wall))
+        CHECKS.check(abs(narrated.shape[0] / float(rate) - wall) < 0.4,
+                     "the recording lasts as long as the clock ran, through both freezes",
+                     "{:.2f} s of audio for {:.2f} s".format(narrated.shape[0] / float(rate), wall))
         CHECKS.check(len(audio["gaps"]) == 1 and 1.5 < audio["gaps"][0]["seconds"] < 2.6,
                      "only the dropped freeze was padded with silence", str(audio["gaps"]))
-        CHECKS.check(narrated.shape == mic.shape, "the narrated copy is as long as the microphone")
         schedule = recordlog.announcement_schedule(events, audio["offset"])
         CHECKS.check(audio["announcements"] == len(schedule) >= 4,
                      "an announcement per lesion settled on", "{} / {}".format(audio["announcements"], len(schedule)))
         CHECKS.check(not any("lesion three" == text for _t, _c, text in schedule),
                      "the burst was not announced lesion by lesion", str([s[2] for s in schedule]))
         for at, _clips, text in schedule:
-            start = int(at * rate)
-            window = slice(start, start + int(0.8 * rate))
-            CHECKS.check(not np.array_equal(narrated[window], mic[window]),
-                         "'{}' is spoken in at {:.1f} s".format(text, at))
-        quiet = slice(int(0.2 * rate), int(0.6 * rate))
-        CHECKS.check(np.array_equal(narrated[quiet], mic[quiet]),
-                     "away from the announcements the narrated copy is the microphone")
-        cues = wavfile.read_cue_points(stem + "_mic.wav")
-        CHECKS.check(len(cues) == len(recordlog.cue_marks(events, audio["offset"])) and cues,
+            residual = humResidual(narrated, rate, at)
+            CHECKS.check(residual > 500, "'{}' is spoken in at {:.1f} s".format(text, at), "{:.0f}".format(residual))
+        quiet = humResidual(narrated, rate, 0.2, 0.4)
+        CHECKS.check(quiet < 50, "away from the announcements it is the microphone alone", "{:.1f}".format(quiet))
+        cues = wavfile.read_cue_points(micPath)
+        CHECKS.check(cues and len(cues) == len(recordlog.cue_marks(events, audio["offset"])),
                      "a cue point per lesion change", str(cues[:3]))
-        with open(stem + ".srt", encoding="utf-8") as handle:
-            srt = handle.read()
-        CHECKS.check("Lesion #2 of 3" in srt and "No lesion selected" in srt and " --> " in srt,
-                     "the subtitles name the lesions")
-        with open(stem + "_labels.txt", encoding="utf-8") as handle:
-            labels = [line.split("\t") for line in handle.read().splitlines()]
-        CHECKS.check(labels and all(len(row) == 3 for row in labels), "the Audacity label track parses")
 
-        videoLog = log["video"]
-        CHECKS.check(abs(videoLog["duration"] - (log["duration"] - videoLog["offset"])) < 0.5,
+        videoLog = self.log(VIDEO, CASE_ONE)
+        meta = videoLog["video"]
+        CHECKS.check(videoLog["kind"] == VIDEO and videoLog["file"] == CASE_ONE + ".mp4" and meta["sound"] is True,
+                     "the video's log says it has sound", str(meta))
+        CHECKS.check("video_started" in [e["type"] for e in videoLog["events"]]
+                     and recordlog.LESION_RENUMBERED in [e["type"] for e in videoLog["events"]],
+                     "and has the lesion events too")
+        CHECKS.check(abs(meta["duration"] - (videoLog["duration"] - meta["offset"])) < 0.5,
                      "the video lasts as long as the clock ran, freezes included",
-                     "{:.2f} s of video for {:.2f} s".format(videoLog["duration"], log["duration"] - videoLog["offset"]))
-        if ffmpeg and shutil.which("ffprobe"):
-            streams = ffprobe(video, "codec_type,codec_name")["streams"]
-            # (a third, "data" stream is the QuickTime chapter track)
-            CHECKS.check({"audio", "video"} <= {s["codec_type"] for s in streams},
-                         "the MP4 carries the narrated audio", str(streams))
-            marks = chapters(video)
-            CHECKS.check(len(marks) >= 5 and any(m["tags"]["title"].startswith("Lesion #1") for m in marks),
-                         "the MP4 has a chapter per lesion stretch", str([m["tags"]["title"] for m in marks]))
-            png = os.path.join(self.root, "frame.png")
-            early = frameAt(video, 0.5, png)
-            CHECKS.check(not early.isNull() and early.width() == videoLog["size"][0], "a frame decodes")
-            dot = qt.QColor(early.pixel(8 + recording.BANNER_HEIGHT // 4, recording.BANNER_HEIGHT // 2))
-            CHECKS.check(dot.red() > 150 and dot.green() < 90, "the banner has its red dot",
-                         str((dot.red(), dot.green(), dot.blue())))
-            late = frameAt(video, videoLog["duration"] - 1.0, os.path.join(self.root, "frame2.png"))
-            early = early.convertToFormat(qt.QImage.Format_RGB32)
-            late = late.convertToFormat(qt.QImage.Format_RGB32)
-            CHECKS.check(bytes(early.constBits()) != bytes(late.constBits()),
-                         "frames change as the reader moves")
+                     "{:.2f} s of video for {:.2f} s".format(meta["duration"], videoLog["duration"] - meta["offset"]))
+        streams = ffprobe(videoPath, "codec_type,codec_name")["streams"]
+        # (a third, "data" stream is the QuickTime chapter track)
+        CHECKS.check({"audio", "video"} <= {s["codec_type"] for s in streams},
+                     "the MP4 has a sound track", str(streams))
+        marks = chapters(videoPath)
+        CHECKS.check(len(marks) >= 5 and any(m["tags"]["title"].startswith("Lesion #1") for m in marks),
+                     "the MP4 has a chapter per lesion stretch", str([m["tags"]["title"] for m in marks]))
+        soundRate, sound = soundOf(videoPath, os.path.join(self.root, "sound.wav"))
+        CHECKS.check(abs(sound.shape[0] / float(soundRate) - meta["duration"]) < 0.5,
+                     "the sound runs through the whole video",
+                     "{:.2f} s for {:.2f} s".format(sound.shape[0] / float(soundRate), meta["duration"]))
+        CHECKS.check(rms(sound[: int(1.0 * soundRate)]) > 0.5 * HUM_LEVEL / np.sqrt(2),
+                     "it is the microphone (its hum)", "{:.0f}".format(rms(sound[: soundRate])))
+        heard = 0
+        shift = videoLog["audio"]["offset"] - meta["offset"]
+        for at, _clips, text in recordlog.announcement_schedule(videoLog["events"], videoLog["audio"]["offset"]):
+            if 0.0 <= at + shift < meta["duration"] - 1.0:
+                residual = humResidual(sound, soundRate, at + shift)
+                CHECKS.check(residual > 500, "'{}' can be heard in the video at {:.1f} s".format(text, at + shift),
+                             "{:.0f}".format(residual))
+                heard += 1
+        CHECKS.check(heard >= 4, "every announcement is in the video's sound", str(heard))
+        png = os.path.join(self.root, "frame.png")
+        early = frameAt(videoPath, 0.5, png)
+        CHECKS.check(not early.isNull() and early.width() == meta["size"][0], "a frame decodes")
+        dot = qt.QColor(early.pixel(8 + recording.BANNER_HEIGHT // 4, recording.BANNER_HEIGHT // 2))
+        CHECKS.check(dot.red() > 150 and dot.green() < 90, "the banner has its red dot",
+                     str((dot.red(), dot.green(), dot.blue())))
+        late = frameAt(videoPath, meta["duration"] - 1.0, os.path.join(self.root, "frame2.png"))
+        early = early.convertToFormat(qt.QImage.Format_RGB32)
+        late = late.convertToFormat(qt.QImage.Format_RGB32)
+        CHECKS.check(bytes(early.constBits()) != bytes(late.constBits()),
+                     "frames change as the reader moves")
 
     def test_04_second_case_files(self):
-        CHECKS.step("The second case's segment")
-        stem = self.caseTwoStem
-        with open(stem + ".json", encoding="utf-8") as handle:
-            log = json.load(handle)
-        CHECKS.check(log["case_id"] == CASE_TWO, "it is the second case's")
-        sources = [e.get("source") for e in log["events"] if e["type"] == "video_source"]
-        CHECKS.check(sources == ["t1c"], "the switch to the t1c view is logged", str(sources))
+        CHECKS.step("The second case's takes")
+        log = self.log(MICROPHONE, CASE_TWO)
+        CHECKS.check(log["case_id"] == CASE_TWO, "they are the second case's")
         CHECKS.check(-0.3 < log["audio"]["offset"] <= 0.0,
-                     "its audio starts with the segment, give or take what was still in flight",
+                     "its audio starts with the take, give or take what was still in flight",
                      str(log["audio"]["offset"]))
         CHECKS.check(any(e["type"] == recordlog.LESION_SELECTED for e in log["events"]),
                      "its lesion selection is logged")
+        videoLog = self.log(VIDEO, CASE_TWO)
+        sources = [e.get("source") for e in videoLog["events"] if e["type"] == "video_source"]
+        CHECKS.check(sources == ["t1c"], "the switch to the t1c view is in the video's log", str(sources))
+        CHECKS.check(not any(e["type"] == "video_source" for e in log["events"]),
+                     "and not in the microphone's")
 
-    def test_04b_microphone_stopped_before_the_video(self):
-        CHECKS.step("The microphone stops first: the MP4 keeps the whole video")
+    def test_05_microphone_stopped_before_the_video(self):
+        CHECKS.step("The microphone switch goes off first: the video keeps its sound")
         widget = self.widget
-        if not recording.findFfmpeg()[0] or not shutil.which("ffprobe"):
-            print("  (no ffmpeg: skipped)")
-            return
         self.fake()
+        self.asked[:] = []
         widget.recordAudioButton.click()
         widget.recordVideoButton.click()
         pump(1.5)
-        stem = widget.recorder.segment.path("")
         widget.recordAudioButton.click()
-        pump(2.5)
+        pump(0.3)
+        CHECKS.check(widget.recorder.capturing and widget.recorder.videoOn,
+                     "the microphone stays open for the video")
+        pump(2.2)
         widget.recordVideoButton.click()
-        CHECKS.check(waitForFiles(widget), "finished")
-        with open(stem + ".json", encoding="utf-8") as handle:
-            log = json.load(handle)
-        container = float(ffprobe(stem + ".mp4", "duration", section="format")["format"]["duration"])
-        CHECKS.check(abs(container - log["video"]["duration"]) < 0.4,
-                     "the MP4 runs as long as the video",
-                     "{:.2f} s for {:.2f} s of video".format(container, log["video"]["duration"]))
-        CHECKS.check(container > log["audio"]["duration"] + 1.5,
-                     "and longer than the microphone, which stopped first",
-                     "{:.2f} s vs {:.2f} s of audio".format(container, log["audio"]["duration"]))
+        CHECKS.check(waitForFiles(widget), "saved")
+        CHECKS.check(self.asked == [(CASE_TWO, (MICROPHONE,), False), (CASE_TWO, (VIDEO,), False)],
+                     "each switch asked before replacing what the case had", str(self.asked))
+        microphone = self.seconds(MICROPHONE, CASE_TWO)
+        CHECKS.check(1.2 < microphone < 2.4, "the microphone recording ends where its switch went off",
+                     "{:.2f} s".format(microphone))
+        videoLog = self.log(VIDEO, CASE_TWO)
+        container = self.seconds(VIDEO, CASE_TWO)
+        CHECKS.check(abs(container - videoLog["video"]["duration"]) < 0.4 and container > 3.4,
+                     "the MP4 runs as long as the video", "{:.2f} s".format(container))
+        soundRate, sound = soundOf(self.exported(VIDEO, CASE_TWO), os.path.join(self.root, "sound5.wav"))
+        tail = sound[-int(1.0 * soundRate):]
+        CHECKS.check(abs(sound.shape[0] / float(soundRate) - container) < 0.4
+                     and rms(tail) > 0.5 * HUM_LEVEL / np.sqrt(2),
+                     "and has sound to its end", "{:.2f} s, last second rms {:.0f}".format(
+                         sound.shape[0] / float(soundRate), rms(tail)))
 
-    def test_05_without_ffmpeg(self):
-        CHECKS.step("No ffmpeg: VTK's Theora writer")
+    def test_06_without_ffmpeg(self):
+        CHECKS.step("No ffmpeg: no video, and ffmpeg is offered")
         widget = self.widget
         original = recording.findFfmpeg
+        offered = []
         recording.findFfmpeg = lambda refresh=False: (None, False)
+        slicer.util.confirmYesNoDisplay = lambda *a, **k: offered.append(a) and False
         try:
             widget._updateRecordingControls()
             CHECKS.check(widget.getFfmpegButton.visible, "the panel offers to get ffmpeg")
+            CHECKS.check("needs ffmpeg" in widget.recordingStatusLabel.text, "and says the video needs it",
+                         widget.recordingStatusLabel.text)
             widget.recordVideoButton.click()
-            pump(2.5)
-            stem = widget.recorder.segment.path("")
-            widget.recordVideoButton.click()
-            CHECKS.check(waitForFiles(widget), "finished")
+            pump(0.3)
+            CHECKS.check(len(offered) == 1, "Record video offers to download it")
+            CHECKS.check(not widget.recorder.videoOn and not widget.recordVideoButton.checked
+                         and not widget.recorder.takes and not widget.recorder.capturing,
+                         "declined: nothing starts")
         finally:
             recording.findFfmpeg = original
+            slicer.util.confirmYesNoDisplay = lambda *a, **k: True
             widget._updateRecordingControls()
-        CHECKS.check(os.path.isfile(stem + ".ogv"), "an .ogv was written")
-        with open(stem + ".json", encoding="utf-8") as handle:
-            log = json.load(handle)
-        CHECKS.check(log["video"]["encoder"] == "ogv" and log["video"]["fps"] == recording.THEORA_FPS,
-                     "at the Theora frame rate", str(log["video"]))
-        if shutil.which("ffprobe"):
-            streams = ffprobe(stem + ".ogv", "codec_name")["streams"]
-            CHECKS.check(streams and streams[0]["codec_name"] == "theora", "it is Theora", str(streams))
 
-    def test_06_a_microphone_that_will_not_open(self):
-        CHECKS.step("A microphone that fails to open leaves nothing behind")
+    def test_07_a_microphone_that_will_not_open(self):
+        CHECKS.step("A microphone that fails to open")
         widget = self.widget
         mic = self.fake()
         mic.failOnStart = True
-        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER, CASE_TWO)
-        before = sorted(os.listdir(folder))
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER, MICROPHONE)
+        before = {name: os.stat(os.path.join(folder, name)).st_mtime_ns for name in os.listdir(folder)}
         self.warnings[:] = []
         widget.recordAudioButton.click()
         pump(0.2)
         CHECKS.check(not widget.recorder.audioOn and not widget.recordAudioButton.checked,
-                     "the switch went back off")
-        CHECKS.check(widget.recorder.segment is None, "no segment is left open")
+                     "the microphone switch went back off")
+        CHECKS.check(not widget.recorder.takes, "no take is left open")
         CHECKS.check(any("could not be started" in w for w in self.warnings), "the reader is told",
                      str(self.warnings))
-        CHECKS.check(sorted(os.listdir(folder)) == before, "no file was written")
+        after = {name: os.stat(os.path.join(folder, name)).st_mtime_ns for name in os.listdir(folder)}
+        CHECKS.check(after == before, "the case's recording is untouched")
 
-    def test_06b_a_microphone_unplugged_while_recording(self):
+        self.warnings[:] = []
+        widget.recordVideoButton.click()
+        pump(1.5)
+        take = widget.recorder.takes.get(VIDEO)
+        CHECKS.check(widget.recorder.videoOn and take is not None and take.wav is None,
+                     "the video records, without sound")
+        CHECKS.check(any("without sound" in w for w in self.warnings), "and says so", str(self.warnings))
+        widget.recordVideoButton.click()
+        CHECKS.check(waitForFiles(widget), "saved")
+        videoLog = self.log(VIDEO, CASE_TWO)
+        streams = ffprobe(self.exported(VIDEO, CASE_TWO), "codec_type")["streams"]
+        CHECKS.check(videoLog["video"]["sound"] is False and "audio" not in {s["codec_type"] for s in streams},
+                     "its log and its file agree it has no sound", str(streams))
+
+    def test_08_a_microphone_unplugged_while_recording(self):
         CHECKS.step("A microphone unplugged mid-recording is noticed and its audio kept")
         widget = self.widget
         mic = self.fake()
         self.warnings[:] = []
         widget.recordAudioButton.click()
+        widget.recordVideoButton.click()
         pump(1.5)
-        stem = widget.recorder.segment.path("")
         mic.unplugged = True                      # Qt keeps saying "active"
         pump(recording.QUIET_SECONDS + 1.5)
         CHECKS.check(not widget.recorder.audioOn and not widget.recordAudioButton.checked,
                      "the microphone recording stopped by itself")
-        CHECKS.check(any("stopped delivering audio" in w for w in self.warnings),
-                     "the reader is told", str(self.warnings))
-        CHECKS.check(waitForFiles(widget), "finished")
-        rate, kept = wavfile.read_wav(stem + "_mic.wav")
-        CHECKS.check(1.2 < kept.shape[0] / float(rate) < 2.5, "what it recorded until then is kept",
-                     "{:.2f} s".format(kept.shape[0] / float(rate)))
+        CHECKS.check(widget.recorder.videoOn, "the video goes on")
+        CHECKS.check(any("stopped delivering audio" in w and "without sound" in w for w in self.warnings),
+                     "the reader is told, of both", str(self.warnings))
+        widget.recordVideoButton.click()
+        CHECKS.check(waitForFiles(widget), "saved")
+        microphone = self.seconds(MICROPHONE, CASE_TWO)
+        CHECKS.check(1.2 < microphone < 2.5, "what the microphone recorded until then is kept",
+                     "{:.2f} s".format(microphone))
+        videoLog = self.log(VIDEO, CASE_TWO)
+        CHECKS.check(videoLog["video"]["sound"] is True
+                     and videoLog["audio"]["duration"] < videoLog["video"]["duration"] - 2.0,
+                     "the video has the sound up to the unplugging", str(videoLog.get("audio")))
 
-    def test_07_a_microphone_that_gives_silence(self):
+    def test_09_a_microphone_that_gives_silence(self):
         CHECKS.step("A microphone that delivers only zeros is reported")
         widget = self.widget
         self.fake(silent=True)
@@ -607,11 +720,11 @@ class RecordingIntegrationTest(unittest.TestCase):
         widget.recordAudioButton.click()
         pump(recording.SILENCE_WARNING_SECONDS + 1.5)
         widget.recordAudioButton.click()
-        CHECKS.check(waitForFiles(widget), "finished")
+        CHECKS.check(waitForFiles(widget), "saved")
         CHECKS.check(any("pure silence" in w for w in self.warnings), "the reader is warned",
                      str(self.warnings))
 
-    def test_08_high_dpi_grabs_fill_the_frame(self):
+    def test_10_high_dpi_grabs_fill_the_frame(self):
         CHECKS.step("A grab from a high-DPI screen fills the frame")
         image = qt.QImage(400, 300, qt.QImage.Format_RGB32)
         image.fill(qt.QColor(255, 0, 0))
@@ -622,7 +735,7 @@ class RecordingIntegrationTest(unittest.TestCase):
                      "the far corner of the picture is the picture, not black",
                      str((corner.red(), corner.green(), corner.blue())))
 
-    def test_09_a_lesion_selected_before_recording_is_announced(self):
+    def test_11_a_lesion_selected_before_recording_is_announced(self):
         CHECKS.step("Record pressed with a lesion selected: it is announced at the start")
         widget = self.widget
         self.selectLesion(1)
@@ -630,58 +743,52 @@ class RecordingIntegrationTest(unittest.TestCase):
         self.fake()
         widget.recordAudioButton.click()
         pump(2.5)
-        stem = widget.recorder.segment.path("")
         widget.recordAudioButton.click()
-        CHECKS.check(waitForFiles(widget), "finished")
-        with open(stem + ".json", encoding="utf-8") as handle:
-            log = json.load(handle)
+        CHECKS.check(waitForFiles(widget), "saved")
+        log = self.log(MICROPHONE, CASE_TWO)
         CHECKS.check(log["audio"]["announcements"] == 1, "one announcement", str(log["audio"]))
-        cues = wavfile.read_cue_points(stem + "_mic.wav")
-        CHECKS.check(cues and cues[0][0] == 0 and cues[0][1].startswith("Lesion #1"),
+        path = self.exported(MICROPHONE, CASE_TWO)
+        cues = wavfile.read_cue_points(path)
+        CHECKS.check(cues and cues[0][0] < 0.05 * 16000 and cues[0][1].startswith("Lesion #1"),
                      "and a cue point at the very start", str(cues))
-        rate, mic = wavfile.read_wav(stem + "_mic.wav")
-        _rate, narrated = wavfile.read_wav(stem + ".wav")
-        CHECKS.check(not np.array_equal(narrated[: int(0.8 * rate)], mic[: int(0.8 * rate)]),
-                     "spoken into the first second")
+        rate, narrated = wavfile.read_wav(path)
+        CHECKS.check(humResidual(narrated, rate, 0.0) > 500, "spoken into the first second")
 
-    def test_10_a_disk_that_fails_mid_recording(self):
-        CHECKS.step("The microphone file cannot be written: the microphone stops, the rest goes on")
+    def test_12_a_disk_that_fails_mid_recording(self):
+        CHECKS.step("A recording file cannot be written: the recording stops, what it had is kept")
         widget = self.widget
         self.fake()
         self.warnings[:] = []
         widget.recordAudioButton.click()
         widget.recordVideoButton.click()
         pump(1.2)
-        segment = widget.recorder.segment
-        stem = segment.path("")
+        take = widget.recorder.takes[MICROPHONE]
 
         def fullDisk(data):
             raise OSError(28, "No space left on device")
 
-        segment.wav.write = fullDisk
+        take.wav.write = fullDisk
         pump(1.0)
-        CHECKS.check(not widget.recorder.audioOn and not widget.recordAudioButton.checked,
-                     "the microphone recording stopped")
-        CHECKS.check(widget.recorder.videoOn and widget._recIndicator is not None,
-                     "the video goes on, REC still showing")
+        CHECKS.check(not widget.recorder.recording and not widget.recordAudioButton.checked
+                     and not widget.recordVideoButton.checked and widget._recIndicator is None,
+                     "both stopped (their files share the disk)")
         CHECKS.check(any("could not be written" in w for w in self.warnings), "the reader is told",
                      str(self.warnings))
-        pump(0.8)
-        widget.recordVideoButton.click()
-        CHECKS.check(waitForFiles(widget), "finished")
-        with open(stem + ".json", encoding="utf-8") as handle:
-            log = json.load(handle)
+        CHECKS.check(waitForFiles(widget), "saved")
+        log = self.log(MICROPHONE, CASE_TWO)
         CHECKS.check("audio_write_failed" in [e["type"] for e in log["events"]],
                      "the failure is in the event log")
-        CHECKS.check(os.path.isfile(stem + "_mic.wav") and log.get("video", {}).get("file"),
-                     "what reached the disk and the video are kept", str(log.get("files")))
+        CHECKS.check(1.0 < self.seconds(MICROPHONE, CASE_TWO) < 1.8 and self.seconds(VIDEO, CASE_TWO) > 1.0,
+                     "what reached the disk and the video are kept",
+                     "{:.2f} s / {:.2f} s".format(self.seconds(MICROPHONE, CASE_TWO), self.seconds(VIDEO, CASE_TWO)))
 
-    def test_11_frames_owed_for_a_freeze_show_the_old_picture(self):
+    def test_13_frames_owed_for_a_freeze_show_the_old_picture(self):
         CHECKS.step("After a freeze, the frames it owes repeat the picture from before it")
         widget = self.widget
+        self.fake()
         widget.recordVideoButton.click()
         pump(1.0)
-        writer = widget.recorder.segment.writer
+        writer = widget.recorder.takes[VIDEO].writer
         pushes = []
         original = writer.push
 
@@ -695,7 +802,7 @@ class RecordingIntegrationTest(unittest.TestCase):
         time.sleep(1.5)                           # Slicer frozen
         pump(0.3)
         widget.recordVideoButton.click()
-        CHECKS.check(waitForFiles(widget), "finished")
+        CHECKS.check(waitForFiles(widget), "saved")
         burst = [i for i, (_frame, repeat) in enumerate(pushes) if repeat >= 10]
         CHECKS.check(len(burst) == 1, "one burst of repeats after the freeze", str([r for _f, r in pushes]))
         i = burst[0]
@@ -703,13 +810,170 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(i + 1 < len(pushes) and pushes[i + 1][1] == 1 and pushes[i + 1][0] is not before,
                      "followed by one new picture")
 
+    def test_14_one_recording_per_case(self):
+        CHECKS.step("One recording per case: asked before replacing, the newest take wins")
+        widget = self.widget
+        path = self.exported(MICROPHONE, CASE_TWO)
+        stamp = os.stat(path).st_mtime_ns
+        self.fake()
+        self.asked[:], self.answers[:] = [], [False]
+        widget.recordAudioButton.click()
+        pump(0.3)
+        CHECKS.check(self.asked == [(CASE_TWO, (MICROPHONE,), False)], "recording a recorded case asks first",
+                     str(self.asked))
+        CHECKS.check(not widget.recorder.audioOn and not widget.recordAudioButton.checked
+                     and not widget.recorder.capturing, "\"Keep it\": nothing starts")
+        CHECKS.check(os.stat(path).st_mtime_ns == stamp, "and the recording stays as it was")
+
+        # a case without a recording; its first take is held back from being
+        # saved while the second one starts
+        os.remove(path)
+        os.remove(os.path.splitext(path)[0] + ".json")
+        gate = threading.Event()
+        original = recording.finishTake
+
+        def heldBack(take):
+            gate.wait(60)
+            return original(take)
+
+        recording.finishTake = heldBack
+        try:
+            self.asked[:], self.answers[:] = [], [True]
+            widget.recordAudioButton.click()
+            pump(1.0)
+            widget.recordAudioButton.click()      # first take: about a second
+            CHECKS.check(not self.asked, "a case without a recording is not asked about")
+            widget.recordAudioButton.click()
+            CHECKS.check(self.asked == [(CASE_TWO, (MICROPHONE,), False)],
+                         "a take still being saved counts as the case's recording", str(self.asked))
+            pump(2.5)
+            widget.recordAudioButton.click()      # second take: two and a half
+            gate.set()
+            CHECKS.check(waitForFiles(widget), "both saved")
+        finally:
+            recording.finishTake = original
+            gate.set()
+        seconds = self.seconds(MICROPHONE, CASE_TWO)
+        CHECKS.check(2.2 < seconds < 3.2, "the newest take is the case's recording", "{:.2f} s".format(seconds))
+        CHECKS.check(not self.leftovers(), "and nothing else is left", str(self.leftovers()))
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
+        names = sorted(os.listdir(os.path.join(folder, MICROPHONE))) + sorted(os.listdir(os.path.join(folder, VIDEO)))
+        CHECKS.check(names == sorted(c + e for c in (CASE_ONE, CASE_TWO) for e in (".json", ".wav"))
+                     + sorted(c + e for c in (CASE_ONE, CASE_TWO) for e in (".json", ".mp4")),
+                     "one recording of each kind per case", str(names))
+
+    def test_15_moving_on_to_a_recorded_case(self):
+        CHECKS.step("Moving on to a recorded case while recording asks; a reload goes on")
+        widget = self.widget
+        widget._confirmDiscardIfNeeded = lambda *args, **kwargs: True
+        caseOne = self.exported(MICROPHONE, CASE_ONE)
+        stamp = os.stat(caseOne).st_mtime_ns
+        self.fake()
+        widget.recordAudioButton.click()          # CASE_TWO's recording is replaced
+        pump(1.0)
+        self.asked[:], self.answers[:] = [], [False]
+        widget.onPreviousCase()
+        pump(0.8)
+        CHECKS.check(widget.currentCase().case_id == CASE_ONE, "the first case is open")
+        CHECKS.check(self.asked == [(CASE_ONE, (MICROPHONE,), True)], "it has a recording, so it was asked",
+                     str(self.asked))
+        CHECKS.check(not widget.recorder.recording and not widget.recordAudioButton.checked,
+                     "\"Stop recording\" stopped it")
+        CHECKS.check(waitForFiles(widget), "saved")
+        CHECKS.check(os.stat(caseOne).st_mtime_ns == stamp, "the recorded case keeps its recording")
+        CHECKS.check(0.8 < self.seconds(MICROPHONE, CASE_TWO) < 1.8, "the case before was saved")
+
+        self.answers[:] = [True, True]
+        widget.recordAudioButton.click()          # replaces CASE_ONE's
+        pump(0.8)
+        take = widget.recorder.takes[MICROPHONE]
+        widget.onReset()                          # the same case again, from disk
+        pump(0.8)
+        CHECKS.check(widget.recorder.takes.get(MICROPHONE) is take, "a reload of the case goes on in the same take")
+        widget.onNextCase()                       # replaces CASE_TWO's
+        pump(0.8)
+        CHECKS.check(widget.recorder.audioOn and widget.recorder.takes[MICROPHONE].name == CASE_TWO,
+                     "\"Replace\" records the next case", str(self.asked))
+        pump(1.0)
+        widget.recordAudioButton.click()
+        CHECKS.check(waitForFiles(widget), "saved")
+        log = self.log(MICROPHONE, CASE_ONE)
+        CHECKS.check("case_reloaded" in [e["type"] for e in log["events"]], "the reload is in the log")
+        CHECKS.check(1.2 < self.seconds(MICROPHONE, CASE_ONE) < 4.0, "the first case got the new take",
+                     "{:.2f} s".format(self.seconds(MICROPHONE, CASE_ONE)))
+
+    def test_16_open_folder(self):
+        CHECKS.step("Open folder shows the batch's recordings, without Slicer's library paths")
+        widget = self.widget
+        calls = []
+
+        class Started(object):
+            def __init__(self, args, **kwargs):
+                calls.append((list(args), kwargs))
+
+            def wait(self, timeout=None):
+                return 0
+
+        original = recording.subprocess.Popen
+        opened = []
+        originalUrl = qt.QDesktopServices.openUrl
+        recording.subprocess.Popen = Started
+        qt.QDesktopServices.openUrl = lambda url: opened.append(url.toLocalFile()) or True
+        try:
+            widget.onOpenRecordingsFolder()
+        finally:
+            recording.subprocess.Popen = original
+            qt.QDesktopServices.openUrl = originalUrl
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
+        if not sys.platform.startswith("linux"):
+            CHECKS.check(opened == [folder], "the system opens the recordings folder", str(opened))
+            return
+        CHECKS.check(len(calls) == 1 and os.path.basename(calls[0][0][0]) == "xdg-open"
+                     and calls[0][0][1] == folder, "xdg-open opens GTReview-recordings", str(calls))
+        env = calls[0][1].get("env") or {}
+        home = os.path.realpath(slicer.app.slicerHome)
+        paths = [os.path.realpath(p) for key in ("LD_LIBRARY_PATH", "QT_PLUGIN_PATH")
+                 for p in env.get(key, "").split(os.pathsep) if p]
+        CHECKS.check(env and not any(p.startswith(home) for p in paths) and "PYTHONHOME" not in env,
+                     "with the environment Slicer was started in",
+                     str({k: env.get(k) for k in ("LD_LIBRARY_PATH", "PYTHONHOME", "QT_PLUGIN_PATH")}))
+
+    def test_17_saved_while_slicer_idles(self):
+        CHECKS.step("A take is saved within seconds while Slicer idles in its event loop")
+        widget = self.widget
+        self.fake()
+        widget.recordAudioButton.click()
+        pump(3.0)
+        recording._VOICE_CACHE.clear()            # the clips are loaded again: some work
+        widget.recordAudioButton.click()
+        # wait in Qt's loop, as Slicer does when nothing happens -- not in
+        # pump(), whose sleeps hand the GIL to the saving thread
+        loop = qt.QEventLoop()
+        started = time.monotonic()
+        poll = qt.QTimer()
+        poll.setInterval(500)
+        poll.connect("timeout()", lambda: loop.quit() if not widget.recorder.busyFinishing()
+                     or time.monotonic() - started > 90 else None)
+        poll.start()
+        loop.exec_()
+        poll.stop()
+        took = time.monotonic() - started
+        CHECKS.check(widget.recorder.busyFinishing() == 0 and took < 6.0, "saved in {:.1f} s".format(took))
+        CHECKS.check(not self.leftovers(), "nothing else is left in the folders", str(self.leftovers()))
+
 
 def main():
     print("=" * 72)
     print("GTReview recording integration test")
     print("  Slicer  : {}".format(slicer.app.applicationVersion))
-    print("  ffmpeg  : {}".format(recording.findFfmpeg()[0] or "none (Theora)"))
+    ffmpeg = recording.findFfmpeg()[0]
+    print("  ffmpeg  : {}".format(ffmpeg or "none"))
     print("=" * 72)
+    if not ffmpeg or not shutil.which("ffprobe"):
+        print("RESULT: FAIL -- the test needs ffmpeg and ffprobe")
+        sys.stdout.flush()
+        slicer.util.exit(1)
+        return
     suite = unittest.TestLoader().loadTestsFromTestCase(RecordingIntegrationTest)
     result = unittest.TextTestRunner(stream=sys.stdout, verbosity=0, failfast=True).run(suite)
     print("\n" + "=" * 72)
