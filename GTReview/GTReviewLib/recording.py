@@ -1,19 +1,22 @@
 """Record the reader's voice and the axial views during a review -- the Slicer half.
 
-Two switches in the panel, and one recording per case for each, in the batch
-folder's ``GTReview-recordings``:
+Two switches in the panel, one on at a time, and one recording per case for
+each, in a folder per case in the batch folder's ``GTReview-recordings``:
 
-``microphone/<case_id>.wav``
+``<case_id>/microphone/<case_id>.wav``
     the microphone, narrated: a chime and "lesion three" spoken in wherever the
     reader moved to another lesion, the reader's voice turned down under it,
     and a WAV cue point at every lesion change
-``video/<case_id>.mp4``
+``<case_id>/video/<case_id>.mp4``
     the view area, or one slice view, under a banner naming the case and the
     active lesion, with the narrated microphone as its sound and one chapter
     per lesion -- recording the video records the microphone with it
 ``<case_id>.json``, next to each
     every event with the lesion's seed voxel, which survives renumbering --
     the record a later re-annotation can follow exactly
+
+Recordings kept as ``<kind>/<case_id>.*`` (before the folder per case) move
+to theirs when the batch is loaded (:func:`adoptOldLayout`).
 
 Recording a case again replaces its recording of that kind, once the panel has
 asked (``confirmReplace``); the old one stays until the new one is saved.
@@ -66,10 +69,10 @@ VOICE_DIR = os.path.join(
 MAC_MICROPHONE_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "GTReviewMacMicrophone.sh"
 )
-#: the folder of the batch directory recordings go into
+#: the folder of the batch directory recordings go into, a folder per case
 RECORDINGS_FOLDER = "GTReview-recordings"
-#: the two kinds of recording: the folder each has in RECORDINGS_FOLDER, and
-#: the file every case gets in it
+#: the two kinds of recording: the folder each has in a case's folder, and
+#: the file the case gets in it
 MICROPHONE = "microphone"
 VIDEO = "video"
 MEDIA_SUFFIX = {MICROPHONE: ".wav", VIDEO: ".mp4"}
@@ -192,8 +195,43 @@ def recordingsFolders(batchDir):
 
 
 def recordingPath(root, kind, caseId):
-    """The recording of *kind* a case keeps: ``<root>/<kind>/<case_id>.wav|.mp4``."""
-    return os.path.join(root, kind, recordlog.safe_name(caseId) + MEDIA_SUFFIX[kind])
+    """The recording of *kind* a case keeps:
+    ``<root>/<case_id>/<kind>/<case_id>.wav|.mp4``."""
+    name = recordlog.safe_name(caseId)
+    return os.path.join(root, name, kind, name + MEDIA_SUFFIX[kind])
+
+
+def adoptOldLayout(batchDir, caseIds):
+    """Move recordings kept the way they were before a folder per case,
+    ``<root>/<kind>/<case_id>.wav|.mp4`` with its ``.json``, to where they
+    go now, so the case still counts as recorded.  Only the recording and
+    the log of a case in *caseIds* move, and only to a place still free;
+    anything else stays, as does the old folder unless it is left empty.
+    Returns the paths moved to."""
+    moved = []
+    for root in recordingsFolders(batchDir):
+        for kind in (MICROPHONE, VIDEO):
+            old = os.path.join(root, kind)
+            if not os.path.isdir(old):
+                continue
+            for caseId in caseIds:
+                name = recordlog.safe_name(caseId)
+                for suffix in (MEDIA_SUFFIX[kind], ".json"):
+                    source = os.path.join(old, name + suffix)
+                    target = os.path.join(root, name, kind, name + suffix)
+                    if not os.path.isfile(source) or os.path.exists(target):
+                        continue
+                    try:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        os.rename(source, target)
+                        moved.append(target)
+                    except OSError as error:  # one held open (a player) stays where it is
+                        logging.warning("GTReview: %s could not be moved to %s: %s", source, target, error)
+            try:
+                os.rmdir(old)  # only when nothing is left in it
+            except OSError:
+                pass
+    return moved
 
 
 def openFolder(path):
@@ -883,7 +921,7 @@ def _audioMeta(take, meta):
 
 
 def _finishMicrophone(take, events, meta):
-    """``microphone/<case>.wav``: the narrated microphone with its cue points;
+    """``<case>/microphone/<case>.wav``: the narrated microphone with its cue points;
     None when the microphone delivered nothing."""
     if take.wav is None or take.wav.frames == 0 or not os.path.isfile(take.wav.path):
         return None
@@ -907,7 +945,7 @@ def _finishMicrophone(take, events, meta):
 
 
 def _finishVideo(take, events, end, meta, keep):
-    """``video/<case>.mp4`` with the narrated microphone and the chapters; None
+    """``<case>/video/<case>.mp4`` with the narrated microphone and the chapters; None
     when not a single frame was recorded."""
     if take.writer is None:
         return None
@@ -1420,7 +1458,7 @@ class Recorder:
     def _openTake(self, kind, context, source=""):
         """A new take of *kind* for the case of *context*, recording at once."""
         root = recordingsFolder(context["batch_dir"])
-        folder = os.path.join(root, kind)
+        folder = os.path.dirname(recordingPath(root, kind, context["case_id"]))
         os.makedirs(folder, exist_ok=True)
         now = datetime.datetime.now()
         stem = recordlog.unique_stem(folder, recordlog.take_stem(context["case_id"], now), WORKING_SUFFIXES)

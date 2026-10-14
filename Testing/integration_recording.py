@@ -23,7 +23,8 @@ On two synthetic cases (numpy + SimpleITK, never patient data) it
    dropped -- and on into the next case.  Nothing is selected as it starts,
    so lesion 1 is selected for it, in each case; the microphone switch
    pulses, the video switch is greyed out and says why;
-3. checks what the first case left: ``GTReview-recordings/microphone/<case>.wav``
+3. checks what the first case left, in a folder of its own:
+   ``GTReview-recordings/<case>/microphone/<case>.wav``
    starting with "lesion one", the lesions spoken in and a cue point per
    lesion change, with its event log, whose seed voxels lie inside the lesion
    every event names (also after the renumbering), as long as the wall clock
@@ -32,7 +33,7 @@ On two synthetic cases (numpy + SimpleITK, never patient data) it
 5. records the video through the same review, the microphone switch greyed
    out and refused meanwhile, on into the next case, where the video is
    pointed at one slice view;
-6. checks the first case's ``video/<case>.mp4``: the microphone as its sound,
+6. checks the first case's ``<case>/video/<case>.mp4``: the microphone as its sound,
    the lesions announced from the first frame on, a chapter per lesion
    stretch, the red-dot banner on frames that change as the reader moves, as
    long as the clock ran, freezes included;
@@ -56,7 +57,9 @@ On two synthetic cases (numpy + SimpleITK, never patient data) it
     recording" stops; a reload of the case goes on in the same take;
 19. Open folder starts the file manager without Slicer's library paths;
 20. a take is saved within seconds while Slicer idles in its event loop;
-21. a Slicer macOS keeps from the microphone explains instead of recording.
+21. a Slicer macOS keeps from the microphone explains instead of recording;
+22. recordings kept the old way (``microphone/<case>.wav``) move into their
+    case's folder when the batch loads, and count as the case's again.
 
 Not named ``test_*`` so the unit-test discovery leaves it alone.  Set
 GTREVIEW_KEEP_RECORDINGS=1 to keep the temporary batch and its recordings.
@@ -395,15 +398,27 @@ class RecordingIntegrationTest(unittest.TestCase):
         return float(ffprobe(self.exported(kind, case), "duration", section="format")["format"]["duration"])
 
     def leftovers(self):
-        """Anything in microphone/ and video/ but the cases' recordings and logs."""
+        """Anything in GTReview-recordings but a folder per case holding
+        microphone/ and video/, and in those but the case's recording and log."""
         out = []
-        for kind in (MICROPHONE, VIDEO):
-            folder = os.path.join(self.root, recording.RECORDINGS_FOLDER, kind)
-            for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-                stem, extension = os.path.splitext(name)
-                if extension not in (recording.MEDIA_SUFFIX[kind], ".json") or "." in stem:
-                    out.append("{}/{}".format(kind, name))
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
+        for case in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+            if case not in (CASE_ONE, CASE_TWO):
+                out.append(case)
+                continue
+            for kind in sorted(os.listdir(os.path.join(folder, case))):
+                if kind not in (MICROPHONE, VIDEO):
+                    out.append("{}/{}".format(case, kind))
+                    continue
+                for name in sorted(os.listdir(os.path.join(folder, case, kind))):
+                    if name not in (case + recording.MEDIA_SUFFIX[kind], case + ".json"):
+                        out.append("{}/{}/{}".format(case, kind, name))
         return out
+
+    def layout(self):
+        """What each case's folder in GTReview-recordings holds."""
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
+        return {case: sorted(os.listdir(os.path.join(folder, case))) for case in sorted(os.listdir(folder))}
 
     def selectLesion(self, number, settle=0.05):
         table = self.widget.lesionTable
@@ -542,8 +557,9 @@ class RecordingIntegrationTest(unittest.TestCase):
     def test_03_first_case_microphone(self):
         CHECKS.step("What the first case's microphone recording holds")
         folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
-        CHECKS.check(sorted(os.listdir(folder)) == [MICROPHONE],
-                     "GTReview-recordings in the batch folder holds microphone/", str(os.listdir(folder)))
+        CHECKS.check(self.layout() == {CASE_ONE: [MICROPHONE], CASE_TWO: [MICROPHONE]},
+                     "GTReview-recordings in the batch folder holds a folder per case, with microphone/ in it",
+                     str(self.layout()))
         micPath = self.exported(MICROPHONE, CASE_ONE)
         for name in (micPath, os.path.splitext(micPath)[0] + ".json"):
             CHECKS.check(os.path.isfile(name), "{} written".format(os.path.relpath(name, folder)))
@@ -682,8 +698,8 @@ class RecordingIntegrationTest(unittest.TestCase):
     def test_06_first_case_video(self):
         CHECKS.step("What the first case's video holds")
         folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
-        CHECKS.check(sorted(os.listdir(folder)) == [MICROPHONE, VIDEO],
-                     "GTReview-recordings now holds microphone/ and video/", str(os.listdir(folder)))
+        CHECKS.check(self.layout() == {CASE_ONE: [MICROPHONE, VIDEO], CASE_TWO: [MICROPHONE, VIDEO]},
+                     "each case's folder now holds microphone/ and video/", str(self.layout()))
         videoPath = self.exported(VIDEO, CASE_ONE)
         for name in (videoPath, os.path.splitext(videoPath)[0] + ".json"):
             CHECKS.check(os.path.isfile(name), "{} written".format(os.path.relpath(name, folder)))
@@ -814,7 +830,7 @@ class RecordingIntegrationTest(unittest.TestCase):
         widget = self.widget
         mic = self.fake()
         mic.failOnStart = True
-        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER, MICROPHONE)
+        folder = os.path.dirname(self.exported(MICROPHONE, widget.currentCase().case_id))
         before = {name: os.stat(os.path.join(folder, name)).st_mtime_ns for name in os.listdir(folder)}
         self.warnings[:] = []
         widget.recordAudioButton.click()
@@ -1050,10 +1066,12 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(2.2 < seconds < 3.2, "the newest take is the case's recording", "{:.2f} s".format(seconds))
         CHECKS.check(not self.leftovers(), "and nothing else is left", str(self.leftovers()))
         folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
-        names = sorted(os.listdir(os.path.join(folder, MICROPHONE))) + sorted(os.listdir(os.path.join(folder, VIDEO)))
-        CHECKS.check(names == sorted(c + e for c in (CASE_ONE, CASE_TWO) for e in (".json", ".wav"))
-                     + sorted(c + e for c in (CASE_ONE, CASE_TWO) for e in (".json", ".mp4")),
-                     "one recording of each kind per case", str(names))
+        names = sorted(os.path.relpath(os.path.join(where, name), folder)
+                       for where, _folders, files in os.walk(folder) for name in files)
+        CHECKS.check(names == sorted(os.path.join(case, kind, case + suffix) for case in (CASE_ONE, CASE_TWO)
+                                     for kind in (MICROPHONE, VIDEO)
+                                     for suffix in (recording.MEDIA_SUFFIX[kind], ".json")),
+                     "one recording of each kind per case, in the case's own folder", str(names))
 
     def test_18_moving_on_to_a_recorded_case(self):
         CHECKS.step("Moving on to a recorded case while recording asks; a reload goes on")
@@ -1205,6 +1223,29 @@ class RecordingIntegrationTest(unittest.TestCase):
         finally:
             recording._MAC_MICROPHONE["problem"] = None
             del widget._macMicrophoneHelp
+
+
+    def test_22_recordings_kept_the_old_way_move_into_their_case_folder(self):
+        CHECKS.step("Recordings kept as microphone/<case>.wav move into their case's folder as the batch loads")
+        widget = self.widget
+        old = os.path.join(self.root, recording.RECORDINGS_FOLDER, MICROPHONE)
+        os.makedirs(old)
+        kept = self.exported(MICROPHONE, CASE_ONE)
+        for suffix in (".wav", ".json"):             # where an earlier GTReview kept them
+            os.rename(os.path.splitext(kept)[0] + suffix, os.path.join(old, CASE_ONE + suffix))
+        stray = os.path.join(old, CASE_ONE + "_20261013-120000.recording.wav")   # left by a crash
+        open(stray, "wb").close()
+        CHECKS.check(not os.path.exists(kept), "the first case's microphone recording is kept the old way")
+        widget.datasetPathEdit.currentPath = self.root
+        widget.onLoadDataset()
+        pump(0.5)
+        CHECKS.check(os.path.isfile(kept) and os.path.isfile(os.path.splitext(kept)[0] + ".json"),
+                     "loading the batch moved it and its log into the case's folder", str(self.layout()))
+        CHECKS.check(os.listdir(old) == [os.path.basename(stray)], "anything else stays where it was",
+                     str(os.listdir(old)))
+        context = widget._recordingContext()
+        CHECKS.check(context["case_id"] == CASE_ONE and widget.recorder.hasRecording(context, MICROPHONE),
+                     "and the case counts as recorded again")
 
 
 def main():

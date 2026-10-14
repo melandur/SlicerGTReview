@@ -253,8 +253,9 @@
           <li><b>Microphone</b>: pick your input; <i>System default</i> follows the system. Press <b>Test</b> and
             speak: the bar underneath must move. Plugged one in? Press the refresh button.</li>
           <li><b>Video</b>: <i>All views</i>, every sequence as laid out, or a single slice view.</li>
-          <li>Each case keeps <b>one recording of each kind</b>, in <code>GTReview-recordings/microphone</code> and
-            <code>/video</code> inside the batch folder; <b>Next &gt;</b> or <b>Save &amp; next case</b> starts the
+          <li>Each case keeps <b>one recording of each kind</b>, in a folder of its own inside the batch folder,
+            <code>GTReview-recordings/&lt;case&gt;/</code>, with <code>microphone/</code> and <code>video/</code> in
+            it; <b>Next &gt;</b> or <b>Save &amp; next case</b> starts the
             next case's by itself. A case that already has one is asked about first: <i>Replace</i> or keep it.
             <b>Open folder</b> shows them.</li>
         </ul>
@@ -268,6 +269,7 @@
     </figure>
 
     <h3>What you get, per case</h3>
+    <p>In <code>GTReview-recordings/&lt;case&gt;/</code>:</p>
     <ul>
       <li><code>microphone/&lt;case&gt;.wav</code>: your voice, with a short chime and a spoken
         <i>“lesion three”</i> as it starts and wherever you moved to another lesion; paging quickly through the

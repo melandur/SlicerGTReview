@@ -698,9 +698,11 @@
               as when a case has just loaded, it selects <strong>lesion 1</strong> for you, as a
               click would, so the first lesion you talk about is named too. The same happens when a
               recording carries on into the next case.</p>
-            <p>Each case keeps <strong>one recording of each kind</strong>, in
-              <code>GTReview-recordings/microphone/</code> and <code>video/</code> inside the batch
-              folder (in your home folder if the batch folder cannot be written). Moving to another
+            <p>Each case keeps <strong>one recording of each kind</strong>, in a folder of its
+              own, <code>GTReview-recordings/&lt;case&gt;/</code> with <code>microphone/</code> and
+              <code>video/</code> in it, inside the batch folder (in your home folder if the batch
+              folder cannot be written). Recordings made before, kept all in one folder, move
+              into their case's folder when the batch is loaded. Moving to another
               case saves the one you leave and starts the next one's, without a gap. Recording a
               case that already has one asks first: <em>Replace</em> records a new one, which takes
               the old one's place once it is saved; <em>Keep it</em> leaves it alone. Moving on to a
@@ -752,6 +754,7 @@
         <div class="ctl">
           <div class="ctl-name">What is saved<span class="kind">files</span></div>
           <div class="ctl-body">
+            <p>In <code>GTReview-recordings/&lt;case&gt;/</code>:</p>
             <ul>
               <li><code>microphone/&lt;case&gt;.wav</code> — your voice with the lesions spoken
                 in, and a marker at every lesion change.</li>

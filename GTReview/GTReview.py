@@ -1965,7 +1965,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.recordAudioButton.setCheckable(True)
         self.recordAudioButton.setIcon(self._iconRecord)
         self._recordAudioToolTip = (
-            "Record the microphone chosen below into GTReview-recordings/microphone/"
+            "Record the microphone chosen below into GTReview-recordings/<case>/microphone/"
             "<case>.wav in the batch folder, one recording per case.\nIt starts by "
             "announcing the selected lesion (lesion 1 if none is), then every switch to "
             "another lesion (\"lesion three\"), so the recording alone tells which lesion "
@@ -1977,7 +1977,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.recordVideoButton.setCheckable(True)
         self.recordVideoButton.setIcon(self._iconRecord)
         self._recordVideoToolTip = (
-            "Record the views chosen below into GTReview-recordings/video/<case>.mp4, "
+            "Record the views chosen below into GTReview-recordings/<case>/video/<case>.mp4, "
             "one video per case, with a banner naming the case and the active lesion.\n"
             "Its sound is the microphone chosen below, with the lesions announced, so it "
             "is recorded instead of the microphone alone, not with it.  Taken from "
@@ -2068,7 +2068,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         actions.addWidget(self.getFfmpegButton)
         self.openRecordingsButton = qt.QPushButton("Open folder")
         self.openRecordingsButton.toolTip = (
-            "Show this batch's recordings: microphone/ and video/ in GTReview-recordings."
+            "Show this batch's recordings: GTReview-recordings, a folder per case with its "
+            "microphone/ and video/."
         )
         self.openRecordingsButton.connect("clicked()", self.onOpenRecordingsFolder)
         actions.addWidget(self.openRecordingsButton)
@@ -2750,6 +2751,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         folder = os.path.abspath(os.path.expanduser(str(root)))
         logPath = self._attachSessionLog(folder)
         logging.info("GTReview: dataset loaded from %s: %d cases", folder, len(self.cases))
+        self._adoptOldRecordings(folder)
         # ctkPathLineEdit only persists its history when something asks it to;
         # its own browse button used to, and that button is hidden now.
         self._rememberDatasetPath()
@@ -2767,6 +2769,20 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._applyCaseFilter()
         if self.filteredCases:
             self.setCurrentCaseIndex(0, force=True)
+
+    def _adoptOldRecordings(self, folder):
+        """Recordings made before they were kept a folder per case move into
+        their case's folder, so each case still counts as recorded."""
+        if recording is None:
+            return
+        try:
+            moved = recording.adoptOldLayout(folder, [case.case_id for case in self.cases])
+        except Exception:  # noqa: BLE001 - recordings must never stop a batch from loading
+            logging.exception("GTReview: moving earlier recordings into their case folders failed")
+            return
+        if moved:
+            logging.info("GTReview: %d earlier recording file(s) moved into their case folders "
+                         "in %s", len(moved), recording.RECORDINGS_FOLDER)
 
     def _attachSessionLog(self, folder):
         """Start writing GTReview.log into *folder*; its path, or None."""
@@ -5916,8 +5932,11 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.openRecordingsButton.enabled = bool(self.batchDirectory)
 
         def shown(path):
-            # a word joiner keeps Qt from breaking the line after the slash
-            return "{}/\u2060{}".format(os.path.basename(os.path.dirname(path)), os.path.basename(path))
+            # <case>/<kind>/<file>; a word joiner keeps Qt from breaking the
+            # line between the kind and the file
+            folder = os.path.dirname(path)
+            return "{}/{}/\u2060{}".format(os.path.basename(os.path.dirname(folder)),
+                                           os.path.basename(folder), os.path.basename(path))
 
         if recorder.takes:
             files = []
@@ -5938,8 +5957,9 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             video = ("the video is {} MP4 at {} fps, with the microphone".format(
                 "H.264" if h264 else "MPEG-4", recording.VIDEO_FPS)
                 if ffmpeg else "the video needs ffmpeg")
-            self._setRecordingStatus("One recording per case, in {}/microphone and /video; {}.".format(
-                recording.RECORDINGS_FOLDER, video))
+            self._setRecordingStatus(
+                "One recording per case, in {}/&lt;case&gt;/microphone and /video; {}.".format(
+                    recording.RECORDINGS_FOLDER, video))
         self._showRecordingIndicator(recorder.recording)
 
     def _updateRecordingPulse(self):

@@ -103,8 +103,8 @@ puts the new ones into it.
   report (see *Log file* below).
 - **Recording** — two optional switches, *Record microphone* and *Record
   video*, on top of the unchanged review. Each case keeps one recording of
-  each kind, in `GTReview-recordings/microphone/` and `video/` in the batch
-  directory. Every switch to another lesion is logged with a voxel inside the
+  each kind, in its own folder in the batch directory,
+  `GTReview-recordings/<case_id>/`, with `microphone/` and `video/` in it. Every switch to another lesion is logged with a voxel inside the
   lesion, spoken into the recording ("lesion three"), and shown in a banner on
   the video of the axial views, whose sound is the microphone, so the
   recording alone tells which lesion was meant (see *Recording* below).
@@ -492,8 +492,8 @@ changes, and anything lost from the microphone.
 
 ### Files
 
-Each case keeps one recording of each kind, in `GTReview-recordings/` in the
-batch directory:
+Each case keeps one recording of each kind, in a folder of its own in the
+batch directory, `GTReview-recordings/<case_id>/`:
 
 | File | What |
 | --- | --- |
@@ -516,6 +516,11 @@ final place, so a crash leaves a playable file. Once stopped it is saved as
 …*, then what it saved. *Open folder* shows `GTReview-recordings`. When the
 batch folder cannot be written, recordings go to
 `~/GTReview-recordings/<batch name>/` instead.
+
+Recordings made before GTReview kept a folder per case, as
+`GTReview-recordings/microphone/<case_id>.wav` and `video/<case_id>.mp4`,
+move into their case's folder, with their logs, when the batch is loaded, and
+count as that case's recordings again.
 
 ### Video
 

@@ -43,9 +43,10 @@ Classify by key (case-insensitive), first match wins:
 
 ## Output contract
 Saving writes `<case_dir>/<case_id>_reviewed_seg.nii.gz`.  Recordings (feature 8)
-go into `<batch_dir>/GTReview-recordings/microphone/<case_id>.wav` and
-`.../video/<case_id>.mp4`, each with `<case_id>.json`, never into a case dir;
-one of each kind per case, replaced only after a confirmation prompt.
+go into a folder per case, `<batch_dir>/GTReview-recordings/<case_id>/`:
+`microphone/<case_id>.wav` and `video/<case_id>.mp4`, each with
+`<case_id>.json`, never into the case's own directory; one of each kind per
+case, replaced only after a confirmation prompt.
 - Original files are opened read-only and never overwritten.
 - If `_reviewed_seg.nii.gz` already exists it is loaded as the starting mask
   (resume a review) and overwritten on save, after a confirmation prompt.
