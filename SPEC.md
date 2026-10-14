@@ -80,10 +80,12 @@ one of each kind per case, replaced only after a confirmation prompt.
 8. **Recording** — optional, on top of the unchanged review: *Record microphone*
    (a chosen input device; Qt Multimedia, which Slicer ships) and *Record video*
    (Slicer's own views, rendered, not the screen, with the microphone as its
-   sound; needs ffmpeg), one recording of each kind per case.  Every lesion
-   event is logged with the number shown AND a seed voxel inside the lesion
-   (numbers are ranks and change on recount); the recordings speak each lesion
-   switch, and the video carries a banner naming the case and the lesion.
+   sound; needs ffmpeg), one at a time, the one on pulsing red; one recording
+   of each kind per case.  Every lesion event is logged with the number shown
+   AND a seed voxel inside the lesion (numbers are ranks and change on
+   recount); the recordings speak each lesion switch, starting with the lesion
+   selected (lesion 1 is selected when none is), and the video carries a
+   banner naming the case and the lesion.
    Capture stays in Slicer's process; encoding and the finished files are made
    off the main thread.  See README, *Recording*.
 

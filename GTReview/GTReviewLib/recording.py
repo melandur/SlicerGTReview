@@ -849,19 +849,27 @@ def finishTake(take):
     return written, take.problem
 
 
-def _narrateInto(take, events, source, target, audio):
-    """*source* with the announcements mixed in, as *target*."""
+def _narrateInto(take, events, source, target, audio, start=None):
+    """*source* with the announcements mixed in, as *target*.
+
+    *start* (take time) is where what is kept of it begins, when that is
+    later than its own start: the video's first frame, before which its
+    sound is cut.  The lesion selected by then is announced right there,
+    rather than cut off with what comes before.
+    """
     rate, mic = wavfile.read_wav(source)
     audio.update(rate=rate, channels=int(mic.shape[1]))
+    offset = float(audio["offset"])
+    begin = offset if start is None else max(offset, float(start))
     placements = []
-    for at, names, _text in recordlog.announcement_schedule(events, float(audio["offset"])):
+    for at, names, _text in recordlog.announcement_schedule(events, begin):
         clip = wavfile.phrase(names, _voice(rate, names), rate)
         if clip is None:
             # a voice without this phrase (one recorded by hand) says it word by word
             words = recordlog.words_for(names)
             clip = wavfile.phrase(words, _voice(rate, words), rate)
         if clip is not None:
-            placements.append((at, clip))
+            placements.append((at + begin - offset, clip))
     wavfile.write_wav(target, rate, wavfile.narrate(mic, rate, placements))
     audio["announcements"] = len(placements)
 
@@ -921,7 +929,7 @@ def _finishVideo(take, events, end, meta, keep):
     if take.wav is not None and take.wav.frames > 0 and os.path.isfile(take.wav.path):
         audio = _audioMeta(take, meta)
         try:
-            _narrateInto(take, events, take.wav.path, take.working(".narrated.wav"), audio)
+            _narrateInto(take, events, take.wav.path, take.working(".narrated.wav"), audio, start=offset)
             sound = take.working(".narrated.wav")
         except Exception as error:  # noqa: BLE001 - the reader's voice rather than nothing
             logging.exception("GTReview: narrating %s failed", take.stem)
@@ -1004,7 +1012,8 @@ def _mux(take, audioPath, intervals, videoOffset, duration, final):
 class Recorder:
     """The microphone and video switches: one take per case for each.
 
-    The video records the microphone too, as its sound.  The panel tells the
+    The video records the microphone too, as its sound, so only one switch
+    is on at a time: the other refuses to start.  The panel tells the
     recorder what happens (:meth:`note`), when the case changes
     (:meth:`caseChanged`) and what the banner should say (:meth:`setBanner`).
     *context()* returns the meta of the case on screen, or None without one.
@@ -1108,6 +1117,9 @@ class Recorder:
         when the reader chose to keep the recording that case has."""
         if self.audioOn:
             return True
+        if self.videoOn:
+            raise RuntimeError("the video is recording it already; one recording at a time, "
+                               "so stop the video first")
         self.stopTest()
         context = self._caseContext()
         if not self._mayReplace(context, [MICROPHONE], switching=False):
@@ -1288,6 +1300,9 @@ class Recorder:
         keep the video that case has.  Needs ffmpeg."""
         if self.videoOn:
             return True
+        if self.audioOn:
+            raise RuntimeError("the microphone is recording; one recording at a time, so stop it "
+                               "first (the video records the microphone too)")
         if not findFfmpeg()[0]:
             raise RuntimeError("Recording video needs ffmpeg: get it with \"Get ffmpeg...\".")
         self.stopTest()

@@ -463,8 +463,16 @@ the problem happened, the last header above the error, rather than the newest.
 The *Recording* section adds two switches to the review, which otherwise
 works exactly as before. **Record microphone** records the reader talking
 through the case; **Record video** records the axial views, with the
-microphone as its sound. Either, both, or neither; while one runs, a red
+microphone as its sound. One at a time: the video carries the microphone
+already, so while one records the other is greyed out. The one recording
+pulses red and reads **■ Stop microphone** or **■ Stop video**, and a red
 **● REC** sits in Slicer's status bar.
+
+Every recording starts by announcing the lesion selected. A case always loads
+with none selected, so a recording that starts on one, or carries on into the
+next case, selects lesion 1 as a click would: the views go to it, and it is
+the first lesion the recording names, rather than one left unnamed until the
+reader picks it.
 
 ### What the recording says about the lesion
 
@@ -516,9 +524,9 @@ side in *Sequences (axial)*), or one slice view with its slider bar, chosen in
 the *Video* box and changeable while recording. A banner above the views names
 the case and the active lesion with its number, label, size and seed voxel.
 Its sound is the microphone picked under *Microphone*, with the lesions
-announced as in the microphone recording, also while *Record microphone* is
-off; without a working microphone the video records without sound, and says
-so.
+announced as in the microphone recording; the lesion selected as the video
+starts is announced from its first frame. Without a working microphone the
+video records without sound, and says so.
 
 The picture is rendered from Slicer's own views, not read off the screen, so
 no screen-recording permission is involved, and windows on top of Slicer, a
@@ -691,15 +699,18 @@ $SLICER/Slicer --no-splash \
 
 The recording has an integration test of its own. It opens no microphone: a
 stand-in delivers a hum at the clock's pace, and can hold audio through a
-freeze and deliver it late, or drop it. It records the views for real while
-lesions are selected, deleted and renumbered by Undo, through two freezes and
-a case switch. It then checks every file: cue points, an announcement per
-lesion settled on and heard in the video's sound too, seed voxels inside the
-lesions they name, audio and video as long as the clock ran, chapters, the
-banner; one recording per case and the questions before one is replaced; a
-microphone that fails to open, one unplugged, one that gives only silence;
-*Open folder*; and that a recording is saved within seconds while Slicer
-idles. It needs ffmpeg and ffprobe. On a machine without a display,
+freeze and deliver it late, or drop it. It goes through the same review twice,
+once on the microphone and once recording the views for real, while lesions
+are selected, deleted and renumbered by Undo, through two freezes and a case
+switch. It then checks every file: lesion 1 announced as each recording
+starts, cue points, an announcement per lesion settled on and heard in the
+video's sound too (from its first frame, even a late one), seed voxels inside
+the lesions they name, audio and video as long as the clock ran, chapters,
+the banner; one recording at a time, the other switch greyed out and the
+running one pulsing; one recording per case and the questions before one is
+replaced; a microphone that fails to open, one unplugged, one that gives only
+silence; *Open folder*; and that a recording is saved within seconds while
+Slicer idles. It needs ffmpeg and ffprobe. On a machine without a display,
 `xvfb-run -a` in front of it works:
 
 ```bash

@@ -237,17 +237,19 @@
 
   <section id="record">
     <h2><span class="step">5</span>Record a review (optional)</h2>
-    <p>Talk through a case, keep the views on video, or both, so whoever listens or re-annotates later knows
-      which lesion you were on at every moment. The review works exactly as without: leave the buttons off and
+    <p>Talk through a case, or keep the views on video with your voice, so whoever listens or re-annotates
+      later knows which lesion you were on at every moment. The review works exactly as without: leave the buttons off and
       nothing is recorded.</p>
 
     <div class="grid">
       <div>
         <h3 class="recording">Recording · what you say and see</h3>
         <ul>
-          <li><b>Record microphone</b> / <b>Record video</b>: two switches, use either or both; the video records
-            the microphone as its sound. While one is on, a red <b>● REC</b> shows in Slicer's status bar and the
-            time runs next to the buttons. Press again to stop.</li>
+          <li><b>Record microphone</b> / <b>Record video</b>: two switches, one at a time; the video records the
+            microphone as its sound. The one on pulses red and reads <b>■ Stop …</b>, the other is greyed out; a red
+            <b>● REC</b> shows in Slicer's status bar and the time runs next to the buttons. Press again to stop.</li>
+          <li>A recording starts by announcing the lesion you have selected, and selects <b>lesion 1</b> if none is
+            (a case loads with none), so the first lesion you talk about is named too.</li>
           <li><b>Microphone</b>: pick your input; <i>System default</i> follows the system. Press <b>Test</b> and
             speak: the bar underneath must move. Plugged one in? Press the refresh button.</li>
           <li><b>Video</b>: <i>All views</i>, every sequence as laid out, or a single slice view.</li>
@@ -257,7 +259,7 @@
             <b>Open folder</b> shows them.</li>
         </ul>
       </div>
-      <figure><img src="img/panel-recording.png" alt="The Recording box while both the microphone and the video record"></figure>
+      <figure><img src="img/panel-recording.png" alt="The Recording box while the video records: its switch pulsing red, the microphone switch greyed out"></figure>
     </div>
 
     <figure>
@@ -268,8 +270,8 @@
     <h3>What you get, per case</h3>
     <ul>
       <li><code>microphone/&lt;case&gt;.wav</code>: your voice, with a short chime and a spoken
-        <i>“lesion three”</i> wherever you moved to another lesion; paging quickly through the list announces only
-        the lesion you stop on.</li>
+        <i>“lesion three”</i> as it starts and wherever you moved to another lesion; paging quickly through the
+        list announces only the lesion you stop on.</li>
       <li><code>video/&lt;case&gt;.mp4</code>: the video, with that same sound and one chapter per lesion. It needs
         ffmpeg: <b>Get ffmpeg…</b> downloads it into Slicer once (about 30&nbsp;MB).</li>
       <li><code>&lt;case&gt;.json</code> next to each: every switch with the lesion's voxel. Lesion numbers change

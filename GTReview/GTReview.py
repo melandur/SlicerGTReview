@@ -1126,14 +1126,18 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # last logged into it, as {"seed", "number"}, to tell a move to another
         # lesion from a renumbering; when the table selection last changed, so
         # the click that made it is not logged as a second visit; whether a
-        # case is loading (nothing is logged meanwhile); the batch folder the
-        # cases came from; and the red REC label in the status bar
+        # case is loading (nothing is logged meanwhile); whether lesion 1 is
+        # being picked for a take that starts with nothing selected (logged by
+        # the take itself); the batch folder the cases came from; the red REC
+        # label in the status bar; and the timer that pulses the switch on
         self.recorder = None
         self._loggedLesion = None
         self._lesionSelectedAt = 0.0
         self._loadingCase = False
+        self._selectingForTake = False
         self.batchDirectory = None
         self._recIndicator = None
+        self._pulseTimer = None
         self.recordAudioButton = None
         self.recordVideoButton = None
 
@@ -1937,11 +1941,13 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _buildRecordingSection(self):
         """Microphone and video switches on top of the review.
 
-        Nothing about the review changes while they are off.  While either is
-        on, every lesion switch is logged with its seed voxel and spoken into
-        the microphone recording, and the video carries a banner naming the
-        case and the active lesion, with the microphone as its sound.  Each
-        case keeps one recording of each kind (GTReviewLib.recording).
+        Nothing about the review changes while they are off.  One is on at a
+        time -- the video records the microphone too -- and pulses red while
+        it is.  Every lesion switch is then logged with its seed voxel and
+        spoken into the recording, starting with the lesion selected when it
+        starts (lesion 1 if none is), and the video carries a banner naming
+        the case and the active lesion, with the microphone as its sound.
+        Each case keeps one recording of each kind (GTReviewLib.recording).
         """
         section = ctk.ctkCollapsibleButton()
         section.text = "Recording"
@@ -1954,26 +1960,38 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         buttons = qt.QHBoxLayout()
         buttons.setSpacing(4)
+        self._iconRecord, self._iconStop = self._recordIcon(), self._stopIcon()
         self.recordAudioButton = qt.QPushButton("Record microphone")
         self.recordAudioButton.setCheckable(True)
-        self.recordAudioButton.setIcon(self._recordIcon())
-        self.recordAudioButton.toolTip = (
+        self.recordAudioButton.setIcon(self._iconRecord)
+        self._recordAudioToolTip = (
             "Record the microphone chosen below into GTReview-recordings/microphone/"
-            "<case>.wav in the batch folder, one recording per case.\nEvery switch to "
-            "another lesion is announced in it (\"lesion three\"), so the recording "
-            "alone tells which lesion you were on."
+            "<case>.wav in the batch folder, one recording per case.\nIt starts by "
+            "announcing the selected lesion (lesion 1 if none is), then every switch to "
+            "another lesion (\"lesion three\"), so the recording alone tells which lesion "
+            "you were on."
         )
+        self.recordAudioButton.toolTip = self._recordAudioToolTip
         self.recordAudioButton.connect("toggled(bool)", self.onRecordAudioToggled)
         self.recordVideoButton = qt.QPushButton("Record video")
         self.recordVideoButton.setCheckable(True)
-        self.recordVideoButton.setIcon(self._recordIcon())
-        self.recordVideoButton.toolTip = (
+        self.recordVideoButton.setIcon(self._iconRecord)
+        self._recordVideoToolTip = (
             "Record the views chosen below into GTReview-recordings/video/<case>.mp4, "
             "one video per case, with a banner naming the case and the active lesion.\n"
-            "Its sound is the microphone chosen below, with the lesions announced.  "
-            "Taken from Slicer's own views, not the screen; needs ffmpeg."
+            "Its sound is the microphone chosen below, with the lesions announced, so it "
+            "is recorded instead of the microphone alone, not with it.  Taken from "
+            "Slicer's own views, not the screen; needs ffmpeg."
         )
+        self.recordVideoButton.toolTip = self._recordVideoToolTip
         self.recordVideoButton.connect("toggled(bool)", self.onRecordVideoToggled)
+        # the switch that is on pulses red (_onRecordingPulse); both keep
+        # their unstyled height, so the row does not jump when one starts
+        for button in (self.recordAudioButton, self.recordVideoButton):
+            button.setMinimumHeight(button.sizeHint.height())
+        self._pulseTimer = qt.QTimer()
+        self._pulseTimer.setInterval(self.RECORDING_PULSE_MS)
+        self._pulseTimer.connect("timeout()", self._onRecordingPulse)
         self.recordingClockLabel = qt.QLabel("")
         buttons.addWidget(self.recordAudioButton, 1)
         buttons.addWidget(self.recordVideoButton, 1)
@@ -2085,6 +2103,25 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             painter.setBrush(qt.QColor(214, 40, 40))
             margin = box // 8
             painter.drawEllipse(margin, margin, box - 2 * margin, box - 2 * margin)
+        finally:
+            painter.end()
+        return qt.QIcon(pixmap)
+
+    @staticmethod
+    def _stopIcon(size=14, scale=6):
+        """A white square, the stop sign, for the switch that is on: it sits
+        on the pulsing red."""
+        box = int(size * scale)
+        pixmap = qt.QPixmap(box, box)
+        pixmap.fill(qt.QColor(0, 0, 0, 0))
+        painter = qt.QPainter()
+        painter.begin(pixmap)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setPen(qt.Qt.NoPen)
+            painter.setBrush(qt.QColor(255, 255, 255))
+            margin = box // 5
+            painter.drawRoundedRect(margin, margin, box - 2 * margin, box - 2 * margin, box // 12, box // 12)
         finally:
             painter.end()
         return qt.QIcon(pixmap)
@@ -2459,6 +2496,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             except Exception:  # noqa: BLE001 - the module unload must go ahead
                 logging.exception("GTReview: stopping the recording failed")
             self._showRecordingIndicator(False)
+        if self._pulseTimer is not None:
+            self._pulseTimer.stop()
         self._cancelNewLesion()
         self.clearLesionHighlight()
         self.removeShortcuts()
@@ -3151,6 +3190,13 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     ACCENT_LESIONS = "#d08a2f"    # amber  - what you inspect
     ACCENT_EDITING = "#8a5fd0"    # purple - what you change
     ACCENT_RECORDING = "#c43c3c"  # red    - what you say and see
+    # The recording switch that is on pulses between these two reds, white
+    # bold text on top: a full cycle every RECORDING_PULSE_S, redrawn every
+    # RECORDING_PULSE_MS
+    RECORDING_PULSE_DARK = (176, 28, 28)
+    RECORDING_PULSE_LIGHT = (236, 82, 82)
+    RECORDING_PULSE_S = 1.4
+    RECORDING_PULSE_MS = 50
 
     def _accentSection(self, section, color, name):
         """Tint a collapsible section, header and body, with its accent colour.
@@ -5434,9 +5480,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         the selected lesion or drop it.  Comparing seeds tells a move to
         another lesion from a renumbering of the same one.  Also keeps the
         video banner current.  Not while a case loads: the state it ends up
-        in is logged once it is up (_afterCaseChangeForRecording).
+        in is logged once it is up (_afterCaseChangeForRecording); nor while
+        a take that just opened picks lesion 1, which it logs itself.
         """
-        if self._loadingCase:
+        if self._loadingCase or self._selectingForTake:
             return
         lesion = self.selectedLesion() if self.logic.segmentationNode is not None else None
         current = None
@@ -5476,13 +5523,18 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _onRecordingTake(self, take):
         """A take just opened: say where the case stands, then log the lesion
         on screen as the first one selected -- into this take only, so a take
-        already running does not get it announced a second time."""
+        already running does not get it announced a second time.  With none
+        selected (a case always loads without), lesion 1 is selected as a
+        click would, so the recording starts by naming the lesion it shows
+        instead of leaving it unnamed until one is picked."""
         done, total = self._doneCount()
         self.recorder.note(
             "case_state", take=take, lesions=total, done=done, unsaved=bool(self.unsavedChanges),
             mask_file=os.path.basename(self.logic.maskPath) if self.logic.maskPath else None,
         )
         lesion = self.selectedLesion() if self.logic.segmentationNode is not None else None
+        if lesion is None:
+            lesion = self._selectFirstLesionForTake()
         self._loggedLesion = None
         if lesion is not None:
             self.recorder.note(recordlog.LESION_SELECTED, take=take, **self._lesionFields(lesion))
@@ -5490,6 +5542,24 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                   "number": int(lesion.index)}
         self._updateRecordingBanner(lesion)
         logging.info("GTReview: recording the %s into %s", take.kind, take.target)
+
+    def _selectFirstLesionForTake(self):
+        """Select lesion 1 through the table, as a click would (the views go
+        to it), without logging it: the take that asked logs it.  None when
+        the case has no lesions, or while a new lesion is being painted."""
+        if self.logic.segmentationNode is None or not self.lesionList or self._newLesion is not None:
+            return None
+        first = min(lesion.index for lesion in self.lesionList)
+        self._selectingForTake = True
+        try:
+            for row in range(self.lesionTable.rowCount):
+                item = self.lesionTable.item(row, 0)
+                if item is not None and item.data(qt.Qt.UserRole) == first:
+                    self.lesionTable.selectRow(row)
+                    break
+        finally:
+            self._selectingForTake = False
+        return self.selectedLesion()
 
     def _recordingContext(self):
         """What a take keeps about the case on screen; None without one."""
@@ -5816,13 +5886,23 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         hasCase = (self.currentCase() is not None and self.logic is not None
                    and self.logic.segmentationNode is not None and bool(self.batchDirectory))
-        for button, on, start, stop in (
-            (self.recordAudioButton, recorder.audioOn, "Record microphone", "Stop microphone"),
-            (self.recordVideoButton, recorder.videoOn, "Record video", "Stop video"),
+        # one at a time: while one runs the other is greyed out and says why
+        for button, on, other, start, stop, toolTip, why in (
+            (self.recordAudioButton, recorder.audioOn, recorder.videoOn, "Record microphone",
+             "Stop microphone", self._recordAudioToolTip,
+             "The video is recording, with the microphone as its sound: one recording at "
+             "a time.  Stop the video to record the microphone alone."),
+            (self.recordVideoButton, recorder.videoOn, recorder.audioOn, "Record video",
+             "Stop video", self._recordVideoToolTip,
+             "The microphone is recording: one recording at a time.  Stop it to record "
+             "the video, which records the microphone too."),
         ):
             self._setChecked(button, on)
             button.text = stop if on else start
-            button.enabled = hasCase or on
+            button.setIcon(self._iconStop if on else self._iconRecord)
+            button.enabled = (hasCase or on) and not other
+            button.toolTip = why if other else toolTip
+        self._updateRecordingPulse()
         # the video records the microphone too: no other one while either runs
         self.microphoneComboBox.enabled = not recorder.mic.active
         self._setChecked(self.testMicrophoneButton, recorder.testing)
@@ -5861,6 +5941,43 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._setRecordingStatus("One recording per case, in {}/microphone and /video; {}.".format(
                 recording.RECORDINGS_FOLDER, video))
         self._showRecordingIndicator(recorder.recording)
+
+    def _updateRecordingPulse(self):
+        """Pulse the switch that is on, and only that one; stop when none is."""
+        if self._pulseTimer is None:
+            return
+        on = self.recorder is not None and (self.recorder.audioOn or self.recorder.videoOn)
+        if on:
+            self._onRecordingPulse()
+            if not self._pulseTimer.isActive():
+                self._pulseTimer.start()
+        else:
+            self._pulseTimer.stop()
+            for button in (self.recordAudioButton, self.recordVideoButton):
+                if button is not None and button.styleSheet:
+                    button.styleSheet = ""
+
+    def _onRecordingPulse(self):
+        """One step of the pulse: the switch that is on, red going lighter
+        and darker again; the other one in Slicer's own style."""
+        try:
+            recorder = self.recorder
+            if recorder is None:
+                return
+            phase = (time.monotonic() % self.RECORDING_PULSE_S) / self.RECORDING_PULSE_S
+            level = 0.5 - 0.5 * math.cos(2.0 * math.pi * phase)
+            red, green, blue = (int(round(dark + (light - dark) * level)) for dark, light in
+                                zip(self.RECORDING_PULSE_DARK, self.RECORDING_PULSE_LIGHT))
+            style = ("QPushButton {{ background-color: rgb({}, {}, {}); color: white; "
+                     "font-weight: bold; border: 1px solid rgb(120, 16, 16); border-radius: 4px; "
+                     "padding: 2px 8px; }}".format(red, green, blue))
+            for button, on in ((self.recordAudioButton, recorder.audioOn),
+                               (self.recordVideoButton, recorder.videoOn)):
+                if button is not None:
+                    button.styleSheet = style if on else ""
+        except Exception:  # noqa: BLE001 - a timer callback must never raise
+            logging.exception("GTReview: the recording pulse failed")
+            self._pulseTimer.stop()
 
     def _showRecordingIndicator(self, shown):
         """A red REC in Slicer's status bar while anything records, whatever
