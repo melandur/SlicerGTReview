@@ -499,7 +499,7 @@ batch directory, `GTReview-recordings/<case_id>/`:
 | --- | --- |
 | `microphone/<case_id>.wav` | the microphone, for listening: a short chime and a spoken "lesion three" wherever the reader moved to another lesion ("new lesion four" for one just painted, "now lesion two" when a recount renumbered the one selected). The reader's voice is turned down under the announcement, never cut. Paging quickly through the list announces only the lesion stopped on. A cue point marks every lesion change (ffmpeg and mpv show them as chapters). |
 | `video/<case_id>.mp4` | the views (see *Video*): H.264 at 10 frames a second, with the same narrated microphone as its sound and one chapter per lesion. |
-| `<case_id>.json`, next to each | every event in order with its time, the lesion's number, label, size, seed voxel (IJK and RAS) and bounding box, plus the case, the mask, its geometry, the reader's login, and where the sound and the picture start on the recording's clock. |
+| `<case_id>.json`, next to each | every event in order with its time, the lesion's number, label, size, seed voxel (IJK and RAS) and bounding box, plus the case, the mask, its geometry, the reader's login, the microphone and its boost, and where the sound and the picture start on the recording's clock. |
 
 Recording a case that already has a recording of that kind asks first:
 *Replace* records a new one, which takes the old one's place once it is saved
@@ -549,20 +549,37 @@ ship it.
 ### Microphone
 
 Pick the input in *Microphone* (*System default* follows the system), press
-the refresh button after plugging one in, and *Test* it: say a few words, and
-after five seconds (or when *Test* is pressed again) GTReview plays back what
-it heard and says whether your voice came in loud enough, too quiet, or
-clipped. The sample is kept in memory only and dropped once it has been
-played; nothing is written.
+the refresh button after plugging one in, and *Test* it: say a few words. The
+microphone listens for five seconds (press *Test* again to stop sooner), with
+the level bar moving underneath; a bar that stays still is the wrong input.
+GTReview then plays back what it heard through the default output and says
+how your voice came in:
 
-A voice that came in quiet is offered a **Boost**, the list next to the level
-bar: up to +24 dB, as much as brings the voice to about -18 dBFS without
-taking its loudest moment within 3 dB of clipping. The boost raises everything
-GTReview takes from the microphone (the level bar, the test, the recordings,
-whose log notes it). Raising the microphone's input volume in the system's
-sound settings is the better fix where it goes high enough, as it adds less
-noise. The microphone and the boost are remembered, the microphone is the
-video's too, and neither can change while a switch records.
+- **right**: -30 dBFS or louder without clipping (about -18 dBFS is ideal);
+- **quiet**: below -30 dBFS, where it no longer stands out against the room;
+- **clipped**: it reached full scale; lower the boost or the input volume;
+- **nothing heard**: check the input, that it is not muted, and that the
+  system lets Slicer use the microphone (see *macOS* and *Windows* below).
+
+The sample is kept in memory only and dropped once it has been played;
+nothing is written. Starting a recording while it plays stops the playback,
+without a verdict, so the speakers are never recorded. *Test* is greyed out
+while a switch records, and the microphone and the boost stay as they are
+while the sample plays.
+
+A voice that came in quiet is offered a **Boost**: *Boost to +N dB* or *Keep
+as it is*. The offer is the most, in steps of 6 dB up to +24 dB, that brings
+the voice no higher than -18 dBFS and keeps its loudest moment 3 dB below
+clipping, on top of any boost already set; when even +6 dB would clip it,
+none is offered. Test again afterwards to hear it. The boost can also be set
+by hand in the *Boost* list next to the level bar (*None*, +6, +12, +18,
++24 dB). It raises everything
+GTReview takes from the microphone: the level bar, the test, and the
+recordings, whose log keeps it as `audio.boost_db`. Raising the microphone's
+input volume in the system's sound settings is the better fix where it goes
+high enough, as it adds less noise. The microphone and the boost are
+remembered, the microphone is the video's too, and neither can change while a
+switch records.
 
 Capture goes through Qt Multimedia, which Slicer ships, and its audio moves on
 Slicer's main thread: while Slicer is busy the sound system holds the samples.
