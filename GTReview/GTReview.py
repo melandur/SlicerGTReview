@@ -105,6 +105,8 @@ DATASET_HISTORY_LIMIT = 10
 #: video source (a slice view name, empty for all views) picked for recording
 RECORDING_MICROPHONE_KEY = "GTReview/RecordingMicrophone"
 RECORDING_VIDEO_SOURCE_KEY = "GTReview/RecordingVideoSource"
+#: the boost (dB) everything taken from the microphone gets
+RECORDING_BOOST_KEY = "GTReview/RecordingMicrophoneBoost"
 
 #: Every macOS-only decision in this file reads this one flag, at call time, so
 #: a test on another platform can patch it and exercise the Mac behaviour.
@@ -1138,6 +1140,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.batchDirectory = None
         self._recIndicator = None
         self._pulseTimer = None
+        # the microphone test: what plays its sample back, and the verdict on
+        # it, shown once it has been heard
+        self._samplePlayer = None
+        self._testReport = None
         self.recordAudioButton = None
         self.recordVideoButton = None
 
@@ -2013,7 +2019,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.testMicrophoneButton.text = "Test"
         self.testMicrophoneButton.setCheckable(True)
         self.testMicrophoneButton.toolTip = (
-            "Open the microphone for ten seconds and watch the level below; nothing is saved."
+            "Say a few words: the microphone listens for {} seconds (press again to stop "
+            "sooner), plays back what it heard, and says whether your voice came in loud "
+            "enough.  The sample is kept in memory only and dropped once played.".format(
+                recording.MIC_TEST_SECONDS)
         )
         self.testMicrophoneButton.connect("toggled(bool)", self.onTestMicrophoneToggled)
         microphoneRow.addWidget(self.microphoneComboBox, 1)
@@ -2025,8 +2034,22 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.microphoneLevelBar.setRange(0, 100)
         self.microphoneLevelBar.setTextVisible(False)
         self.microphoneLevelBar.setMaximumHeight(6)
-        self.microphoneLevelBar.toolTip = "Microphone level while it is open."
-        form.addRow("", self.microphoneLevelBar)
+        self.microphoneLevelBar.toolTip = "Microphone level while it is open, boost included."
+        self.microphoneBoostComboBox = qt.QComboBox()
+        for db in recording.BOOST_STEPS_DB:
+            self.microphoneBoostComboBox.addItem("+{} dB".format(db) if db else "None", db)
+        self.microphoneBoostComboBox.toolTip = (
+            "Raise everything taken from the microphone -- the level, the test, the "
+            "recordings -- for one that stays quiet.  Raising the input volume in the "
+            "system's sound settings first adds less noise."
+        )
+        self.microphoneBoostComboBox.connect("activated(int)", self.onMicrophoneBoostChanged)
+        levelRow = qt.QHBoxLayout()
+        levelRow.setSpacing(4)
+        levelRow.addWidget(self.microphoneLevelBar, 1)
+        levelRow.addWidget(qt.QLabel("Boost:"))
+        levelRow.addWidget(self.microphoneBoostComboBox)
+        form.addRow("", levelRow)
 
         if recording.macMicrophoneProblem():
             # macOS gives the official Slicer silence: say so up front, and how
@@ -2085,7 +2108,14 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # looked up on every call, so a test can answer in its place
             confirmReplace=lambda caseId, kinds, switching: self._confirmReplaceRecording(
                 caseId, kinds, switching),
+            onTestSample=self._onMicrophoneTestSample,
         )
+        self._samplePlayer = recording.SamplePlayer(onDone=self._onMicrophoneTestPlayed)
+        try:
+            boost = int(slicer.app.userSettings().value(RECORDING_BOOST_KEY, 0) or 0)
+        except (TypeError, ValueError):
+            boost = 0
+        self._setMicrophoneBoost(boost if boost in recording.BOOST_STEPS_DB else 0)
         self._refreshMicrophones()
         self._refreshVideoSources()
         self._updateRecordingControls()
@@ -2499,6 +2529,8 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._showRecordingIndicator(False)
         if self._pulseTimer is not None:
             self._pulseTimer.stop()
+        if self._samplePlayer is not None:
+            self._samplePlayer.stop(notify=False)
         self._cancelNewLesion()
         self.clearLesionHighlight()
         self.removeShortcuts()
@@ -5702,6 +5734,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.recorder.stopAudio()
             logging.info("GTReview: microphone recording stopped")
             return
+        self._dropMicrophoneTestPlayback()
         if recording.macMicrophoneProblem():
             self._updateRecordingControls()
             self._macMicrophoneHelp()
@@ -5726,6 +5759,7 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.recorder.stopVideo()
             logging.info("GTReview: video recording stopped")
             return
+        self._dropMicrophoneTestPlayback()
         if not recording.findFfmpeg()[0] and not self._offerFfmpeg(
                 "Recording video needs ffmpeg, which puts the microphone into the video. "):
             self._updateRecordingControls()
@@ -5762,6 +5796,102 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except Exception as error:  # noqa: BLE001
             self._updateRecordingControls()
             raise RuntimeError("The microphone could not be opened: {}".format(error))
+        self._setRecordingStatus(
+            "Speak now: the microphone listens for {} seconds, then plays back what it "
+            "heard.".format(recording.MIC_TEST_SECONDS))
+
+    def _onMicrophoneTestSample(self, data, rate, channels):
+        """The test is over: play back what the microphone heard, then say how
+        loud it came in.  The sample is only in the player meanwhile, and is
+        let go once played."""
+        self._testReport = recording.judgeTestSample(data, rate, channels)
+        logging.info("GTReview: microphone test: %s", self._testReport)
+        try:
+            self._samplePlayer.play(data, rate, channels)
+        except Exception as error:  # noqa: BLE001 - the verdict still counts
+            logging.warning("GTReview: the microphone test could not be played back: %s", error)
+            self._onMicrophoneTestPlayed()
+            return
+        self._updateRecordingControls()
+        self._setRecordingStatus("Playing back what the microphone heard ...")
+
+    def _dropMicrophoneTestPlayback(self):
+        """A recording starts: a test sample still playing would be recorded
+        off the speakers, so it stops, and its verdict goes with it."""
+        if self._samplePlayer is not None and self._samplePlayer.playing:
+            self._samplePlayer.stop(notify=False)
+            self._testReport = None
+
+    def _onMicrophoneTestPlayed(self):
+        report, self._testReport = self._testReport, None
+        self._updateRecordingControls()
+        if report is not None:
+            self._showMicrophoneVerdict(report)
+
+    def _showMicrophoneVerdict(self, report):
+        """Say how loud the test came in; offer a boost when too quiet."""
+        verdict, boost = report["verdict"], int(self.recorder.boostDb)
+        if verdict == "silent":
+            text = ("Nothing was heard.  Check that the microphone is the right one, that it is "
+                    "not muted, and that the system lets Slicer use it.")
+        elif verdict == "loud":
+            text = ("The microphone clips: your voice reached full scale.  Lower the boost or "
+                    "the input volume in the system's sound settings.")
+        elif verdict == "quiet":
+            text = ("Your voice came in quiet ({:.0f} dBFS, about {:.0f} is right).  Speak while "
+                    "testing; if you did, raise the microphone's input volume in the system's "
+                    "sound settings, or boost it here.".format(
+                        report["voice_db"], recording.wavfile.VOICE_TARGET_DB))
+        else:
+            text = "The microphone sounds right: your voice came in at {:.0f} dBFS.".format(
+                report["voice_db"])
+        self._setRecordingStatus(text, warning=verdict != "good")
+        suggested = min(boost + int(report["boost_db"]), max(recording.BOOST_STEPS_DB))
+        if verdict == "quiet" and suggested > boost and self._askMicrophoneBoost(report, suggested):
+            self._setMicrophoneBoost(suggested)
+            self._setRecordingStatus("Boost set to +{} dB.  Test again to hear it.".format(suggested))
+
+    def _askMicrophoneBoost(self, report, suggested):
+        """Whether to raise the boost to *suggested* dB (a test answers here)."""
+        box = qt.QMessageBox(slicer.util.mainWindow())
+        box.setWindowTitle("GTReview: the microphone test")
+        box.setIcon(qt.QMessageBox.Question)
+        box.setText("Your voice came in quiet: {:.0f} dBFS, where about {:.0f} is right.".format(
+            report["voice_db"], recording.wavfile.VOICE_TARGET_DB))
+        box.setInformativeText(
+            "Raising the microphone's input volume in the system's sound settings is the better "
+            "fix, as it adds less noise.  Otherwise GTReview can boost what it records by "
+            "+{} dB.  Test again afterwards to hear it.".format(suggested))
+        boost = box.addButton("Boost to +{} dB".format(suggested), qt.QMessageBox.AcceptRole)
+        box.addButton("Keep as it is", qt.QMessageBox.RejectRole)
+        box.setDefaultButton(boost)
+        box.exec_()
+        clicked = box.clickedButton()
+        return clicked is not None and box.buttonRole(clicked) == qt.QMessageBox.AcceptRole
+
+    def _setMicrophoneBoost(self, db):
+        """Boost the microphone by *db*: the recorder, the list and the setting."""
+        self.recorder.setBoost(db)
+        combo = self.microphoneBoostComboBox
+        previous = self._updatingGui
+        self._updatingGui = True
+        try:
+            combo.currentIndex = max(0, combo.findData(int(db)))
+        finally:
+            self._updatingGui = previous
+        settings = slicer.app.userSettings()
+        settings.setValue(RECORDING_BOOST_KEY, int(db))
+        settings.sync()
+
+    @guarded("Boosting the microphone")
+    def onMicrophoneBoostChanged(self, index=None):
+        del index
+        if self._updatingGui or self.recorder is None:
+            return
+        db = int(self.microphoneBoostComboBox.itemData(self.microphoneBoostComboBox.currentIndex) or 0)
+        self._setMicrophoneBoost(db)
+        self._setRecordingStatus("Boost {}.  Test the microphone to hear it.".format(
+            "+{} dB".format(db) if db else "off"))
 
     @guarded("Getting ffmpeg")
     def onGetFfmpeg(self):
@@ -5920,9 +6050,11 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             button.toolTip = why if other else toolTip
         self._updateRecordingPulse()
         # the video records the microphone too: no other one while either runs
-        self.microphoneComboBox.enabled = not recorder.mic.active
+        playing = self._samplePlayer is not None and self._samplePlayer.playing
+        self.microphoneComboBox.enabled = not recorder.mic.active and not playing
+        self.microphoneBoostComboBox.enabled = not recorder.mic.active and not playing
         self._setChecked(self.testMicrophoneButton, recorder.testing)
-        self.testMicrophoneButton.enabled = not recorder.capturing
+        self.testMicrophoneButton.enabled = not recorder.capturing and not playing
         if not recorder.mic.active:
             self._onRecorderLevel(None)
         if not recorder.recording:

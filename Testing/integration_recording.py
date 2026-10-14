@@ -45,7 +45,9 @@ On two synthetic cases (numpy + SimpleITK, never patient data) it
     the video records without sound, saying so;
 11. a microphone unplugged mid-recording: the video goes on without sound;
     the microphone recording stops, keeping what it had;
-12. a microphone that delivers only zeros is reported;
+12. a microphone that delivers only zeros is reported; the microphone test
+    plays back what it heard and judges it, offers a boost when it was quiet,
+    and keeps nothing; the boost goes into the recordings;
 13. high-DPI grabs fill the frame;
 14. a recording starts by announcing the lesion selected, lesion 1 if none
     is -- in a video from its first frame, even a late one;
@@ -203,9 +205,10 @@ class FakeMicrophone(object):
     """Stands in for recording.MicrophoneInput: a 220 Hz hum at the wall
     clock's pace, delivered from a Qt timer on the main thread."""
 
-    def __init__(self, onData, onLevel=None, rate=16000, silent=False):
+    def __init__(self, onData, onLevel=None, rate=16000, silent=False, level=HUM_LEVEL):
         self._onData, self._onLevel = onData, onLevel
         self.rate, self.channels, self.label = rate, 1, "Fake microphone"
+        self.level = level
         self.started = None
         self.lastData = None
         self.heardSomething = False
@@ -254,7 +257,7 @@ class FakeMicrophone(object):
             owed = kept
             self.dropNextFreeze = False
         t = np.arange(self._produced, self._produced + owed) / float(self.rate)
-        level = 0.0 if self.silent else HUM_LEVEL
+        level = 0.0 if self.silent else self.level
         samples = (np.sin(2 * np.pi * HUM_HZ * t) * level).astype("<i2")
         self._produced += owed
         if np.any(samples):
@@ -905,6 +908,112 @@ class RecordingIntegrationTest(unittest.TestCase):
         CHECKS.check(waitForFiles(widget), "saved")
         CHECKS.check(any("pure silence" in w for w in self.warnings), "the reader is warned",
                      str(self.warnings))
+
+    def test_12b_the_microphone_test_plays_back_and_judges(self):
+        CHECKS.step("The microphone test plays back what it heard, judges it, and keeps nothing")
+        widget = self.widget
+        recorder = widget.recorder
+        case = widget.currentCase().case_id
+        folder = os.path.join(self.root, recording.RECORDINGS_FOLDER)
+
+        def files():
+            return sorted(os.path.relpath(os.path.join(where, name), folder)
+                          for where, _folders, names in os.walk(folder) for name in names)
+
+        before = files()
+        played, asked = [], []
+
+        class Player(object):
+            """In place of the speakers: notes what it would play, and is done
+            a moment later."""
+            playing = False
+
+            def play(self, data, rate, channels, device=None):
+                samples = np.frombuffer(data, dtype="<i2")
+                played.append({"seconds": samples.size / float(rate * channels), "rate": rate,
+                               "channels": channels, "peak": int(np.max(np.abs(samples)))})
+                self.playing = True
+                qt.QTimer.singleShot(300, self.done)
+
+            def done(self):
+                self.playing = False
+                widget._onMicrophoneTestPlayed()
+
+            def stop(self, notify=True):
+                self.playing = False
+
+        player, ask = widget._samplePlayer, widget._askMicrophoneBoost
+        widget._samplePlayer = Player()
+        widget._askMicrophoneBoost = lambda report, suggested: asked.append((report, suggested)) or True
+        quiet = 300.0                                  # a voice at about -44 dBFS
+        try:
+            widget._setMicrophoneBoost(0)
+            self.fake(level=quiet)
+            widget.testMicrophoneButton.click()
+            CHECKS.check(recorder.testing and "Speak now" in widget.recordingStatusLabel.text,
+                         "Test listens, and says to speak", widget.recordingStatusLabel.text)
+            pump(1.5)
+            widget.testMicrophoneButton.click()        # stopped sooner than its five seconds
+            pump(0.1)
+            CHECKS.check(not recorder.testing and len(played) == 1
+                         and abs(played[0]["seconds"] - 1.5) < 0.3 and played[0]["rate"] == 16000,
+                         "what it heard is played back", str(played))
+            CHECKS.check(not widget.testMicrophoneButton.enabled and not widget.microphoneBoostComboBox.enabled,
+                         "nothing else is tried while it plays")
+            pump(0.5)
+            CHECKS.check(len(asked) == 1 and asked[0][0]["verdict"] == "quiet" and asked[0][1] == 24,
+                         "too quiet: a boost is offered, as much as brings the voice up",
+                         str(asked))
+            CHECKS.check(recorder.boostDb == 24 and widget.microphoneBoostComboBox.currentText == "+24 dB"
+                         and "Boost set to +24 dB" in widget.recordingStatusLabel.text,
+                         "taken, the boost is set", widget.recordingStatusLabel.text)
+
+            self.fake(level=quiet)
+            widget.testMicrophoneButton.click()
+            pump(recording.MIC_TEST_SECONDS + 0.5)     # stops by itself
+            pump(0.5)
+            boosted = quiet * 10 ** (24 / 20.0)
+            CHECKS.check(len(played) == 2 and abs(played[1]["seconds"] - recording.MIC_TEST_SECONDS) < 0.4
+                         and abs(played[1]["peak"] - boosted) < 0.05 * boosted,
+                         "the next test stops by itself, and plays back the voice boosted",
+                         str(played[1:]))
+            CHECKS.check("sounds right" in widget.recordingStatusLabel.text and len(asked) == 1,
+                         "and judges it right, with nothing more to offer", widget.recordingStatusLabel.text)
+            CHECKS.check(files() == before, "the tests left no file behind", str(files()))
+
+            self.fake(level=quiet)
+            widget.testMicrophoneButton.click()
+            pump(1.0)
+            widget.testMicrophoneButton.click()
+            pump(0.05)
+            CHECKS.check(len(played) == 3 and widget._samplePlayer.playing, "played back again ...")
+            widget.recordAudioButton.click()           # ... until a recording starts
+            CHECKS.check(recorder.audioOn and not widget._samplePlayer.playing
+                         and "sounds right" not in widget.recordingStatusLabel.text,
+                         "which stops the playback, verdict and all (the speakers would be recorded)")
+            pump(2.5)
+            widget.recordAudioButton.click()
+            CHECKS.check(waitForFiles(widget), "saved")
+            rate, samples = wavfile.read_wav(self.exported(MICROPHONE, case))
+            hum = samples[int(1.3 * rate): int(2.3 * rate), 0]     # after the lesion's announcement
+            log = self.log(MICROPHONE, case)
+            CHECKS.check(log["audio"]["boost_db"] == 24 and abs(rms(hum) * np.sqrt(2) - boosted) < 0.1 * boosted,
+                         "the recording is boosted too, and its log says by how much",
+                         "{} / {:.0f}".format(log["audio"], rms(hum) * np.sqrt(2)))
+
+            self.fake(level=quiet)
+            widget.testMicrophoneButton.click()
+            pump(0.5)
+            widget.recordAudioButton.click()           # a recording ends a test unheard
+            CHECKS.check(recorder.audioOn and not recorder.testing and len(played) == 3,
+                         "a recording started mid-test ends the test without playing it back")
+            pump(0.5)
+            widget.recordAudioButton.click()
+            CHECKS.check(waitForFiles(widget), "saved")
+        finally:
+            widget._setMicrophoneBoost(0)
+            widget._samplePlayer, widget._askMicrophoneBoost = player, ask
+            widget._updateRecordingControls()
 
     def test_13_high_dpi_grabs_fill_the_frame(self):
         CHECKS.step("A grab from a high-DPI screen fills the frame")

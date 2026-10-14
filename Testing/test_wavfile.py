@@ -323,5 +323,58 @@ class ShippedVoiceTest(unittest.TestCase):
         self.assertIsNotNone(wavfile.phrase(recordlog.words_for(names), words, 16000))
 
 
+
+class MicrophoneTestReportTest(unittest.TestCase):
+    """level_report: how loud a microphone test came in, and the boost offered."""
+
+    RATE = 16000
+
+    def voice(self, peak_dbfs, seconds=3.0, pauses=True):
+        """A stand-in voice: a 200 Hz tone in quarter-second bursts, every
+        other one silent, peaking at *peak_dbfs* (overdriven above 0)."""
+        t = np.arange(int(seconds * self.RATE)) / float(self.RATE)
+        x = np.sin(2 * np.pi * 200.0 * t) * 32767.0 * 10 ** (peak_dbfs / 20.0)
+        if pauses:
+            x *= np.sin(2 * np.pi * 2.0 * t) > 0
+        return np.clip(np.round(x), -32768, 32767).astype(np.int16)
+
+    def test_silence_is_nothing_heard(self):
+        self.assertEqual(wavfile.level_report(np.zeros(self.RATE, np.int16), self.RATE)["verdict"], "silent")
+        self.assertEqual(wavfile.level_report(np.zeros(0, np.int16), self.RATE)["verdict"], "silent")
+
+    def test_a_voice_at_a_good_level(self):
+        report = wavfile.level_report(self.voice(-12.0), self.RATE)
+        self.assertEqual((report["verdict"], report["boost_db"]), ("good", 0))
+        self.assertAlmostEqual(report["peak_db"], -12.0, delta=0.2)
+        # a tone's loud stretches are 3 dB under its peak; the pauses do not count
+        self.assertAlmostEqual(report["voice_db"], -15.0, delta=0.5)
+
+    def test_a_quiet_voice_is_offered_the_boost_that_brings_it_up(self):
+        report = wavfile.level_report(self.voice(-40.0), self.RATE)   # voice at -43: 25 dB short
+        self.assertEqual((report["verdict"], report["boost_db"]), ("quiet", 24))
+        report = wavfile.level_report(self.voice(-30.0), self.RATE)   # voice at -33: 15 dB short
+        self.assertEqual((report["verdict"], report["boost_db"]), ("quiet", 12))
+
+    def test_the_boost_offered_leaves_the_loudest_moment_room(self):
+        x = self.voice(-40.0)
+        x[100] = int(32767 * 10 ** (-8 / 20.0))                       # one click at -8 dBFS
+        report = wavfile.level_report(x, self.RATE)
+        self.assertEqual((report["verdict"], report["boost_db"]), ("quiet", 0))
+
+    def test_an_overdriven_voice_clips(self):
+        self.assertEqual(wavfile.level_report(self.voice(6.0), self.RATE)["verdict"], "loud")
+
+    def test_two_channels_are_judged_as_heard(self):
+        x = self.voice(-12.0)
+        self.assertEqual(wavfile.level_report(np.stack([x, x], axis=1), self.RATE)["verdict"], "good")
+
+    def test_converted_for_an_output_that_plays_48_khz_stereo(self):
+        x = self.voice(-12.0, seconds=1.0, pauses=False)
+        out = np.frombuffer(wavfile.convert_pcm(x.tobytes(), self.RATE, 1, 48000, 2), dtype="<i2")
+        out = out.reshape(-1, 2)
+        self.assertEqual(out.shape, (48000, 2))
+        np.testing.assert_array_equal(out[:, 0], out[:, 1])
+        self.assertAlmostEqual(float(np.max(np.abs(out[300:-300]))), float(np.max(np.abs(x))), delta=300)
+
 if __name__ == "__main__":
     unittest.main()

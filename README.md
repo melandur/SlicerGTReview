@@ -549,9 +549,20 @@ ship it.
 ### Microphone
 
 Pick the input in *Microphone* (*System default* follows the system), press
-the refresh button after plugging one in, and *Test* it: the level bar should
-move while you speak. The choice is remembered, and is the video's microphone
-too; it cannot change while either switch records.
+the refresh button after plugging one in, and *Test* it: say a few words, and
+after five seconds (or when *Test* is pressed again) GTReview plays back what
+it heard and says whether your voice came in loud enough, too quiet, or
+clipped. The sample is kept in memory only and dropped once it has been
+played; nothing is written.
+
+A voice that came in quiet is offered a **Boost**, the list next to the level
+bar: up to +24 dB, as much as brings the voice to about -18 dBFS without
+taking its loudest moment within 3 dB of clipping. The boost raises everything
+GTReview takes from the microphone (the level bar, the test, the recordings,
+whose log notes it). Raising the microphone's input volume in the system's
+sound settings is the better fix where it goes high enough, as it adds less
+noise. The microphone and the boost are remembered, the microphone is the
+video's too, and neither can change while a switch records.
 
 Capture goes through Qt Multimedia, which Slicer ships, and its audio moves on
 Slicer's main thread: while Slicer is busy the sound system holds the samples.

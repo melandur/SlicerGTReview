@@ -99,6 +99,11 @@ QUIET_SECONDS = 4.0
 #: a microphone that delivered nothing but exact zeros for this long is muted
 #: by the system (macOS: Slicer has no microphone permission)
 SILENCE_WARNING_SECONDS = 4.0
+#: how long the microphone test listens before it plays back what it heard
+MIC_TEST_SECONDS = 5
+#: the boosts GTReview offers for a quiet microphone, in dB: what it records
+#: from the microphone is raised by it, the test sample too
+BOOST_STEPS_DB = (0, 6, 12, 18, 24)
 #: video frame rate and largest frame
 VIDEO_FPS = 10
 VIDEO_MAX_SIZE = (1920, 1080)
@@ -531,6 +536,86 @@ class MicrophoneInput:
                 self._onLevel(None)
 
 
+def judgeTestSample(data, rate, channels):
+    """How loud a microphone test came in (:func:`wavfile.level_report`)."""
+    channels = max(1, int(channels))
+    frames = len(data) // (2 * channels)
+    samples = np.frombuffer(data[: frames * 2 * channels], dtype="<i2").reshape(frames, channels)
+    return wavfile.level_report(samples, rate, BOOST_STEPS_DB[1:])
+
+
+class SamplePlayer:
+    """Plays 16-bit PCM held in memory once, through the default output (or
+    *device*), and lets go of it; *onDone()* after, played or stopped."""
+
+    def __init__(self, onDone=None):
+        self._onDone = onDone or (lambda: None)
+        self._audio = None
+        self._buffer = None
+        self._guard = qt.QTimer()
+        self._guard.setSingleShot(True)
+        self._guard.connect("timeout()", self.stop)
+
+    @property
+    def playing(self):
+        return self._audio is not None
+
+    def play(self, data, rate, channels, device=None):
+        """Start playing *data*; RuntimeError when nothing can play it."""
+        self.stop(notify=False)
+        info = device if device is not None else qt.QAudioDeviceInfo.defaultOutputDevice()
+        if info is None or info.isNull():
+            raise RuntimeError("there is no sound output to play it on")
+        fmt = qt.QAudioFormat()
+        fmt.setSampleRate(int(rate))
+        fmt.setChannelCount(int(channels))
+        fmt.setSampleSize(16)
+        fmt.setCodec("audio/pcm")
+        fmt.setByteOrder(qt.QAudioFormat.LittleEndian)
+        fmt.setSampleType(qt.QAudioFormat.SignedInt)
+        if not info.isFormatSupported(fmt):
+            near = info.nearestFormat(fmt)
+            if (near.sampleSize() != 16 or near.sampleType() != qt.QAudioFormat.SignedInt
+                    or near.byteOrder() != qt.QAudioFormat.LittleEndian or near.codec() != "audio/pcm"):
+                raise RuntimeError("{} plays no 16-bit audio".format(info.deviceName()))
+            data = wavfile.convert_pcm(data, rate, channels, near.sampleRate(), near.channelCount())
+            fmt, rate, channels = near, near.sampleRate(), near.channelCount()
+        buffer = qt.QBuffer()
+        buffer.setData(qt.QByteArray(bytes(data)))
+        buffer.open(qt.QIODevice.ReadOnly)
+        audio = qt.QAudioOutput(info, fmt)
+        audio.connect("stateChanged(QAudio::State)", self._onState)
+        self._audio, self._buffer = audio, buffer
+        audio.start(buffer)
+        if audio.error() != qt.QAudio.NoError:
+            error = int(audio.error())
+            self.stop(notify=False)
+            raise RuntimeError("{} could not be opened (Qt audio error {})".format(info.deviceName(), error))
+        # should the end never be signalled: the sample's length and a margin
+        seconds = len(data) / float(2 * max(1, int(channels)) * max(1, int(rate)))
+        self._guard.start(int((seconds + 2.0) * 1000))
+
+    def _onState(self, state):
+        # Idle: all of it went out; the stop happens after this signal returns
+        if self._audio is not None and int(state) in (int(qt.QAudio.IdleState), int(qt.QAudio.StoppedState)):
+            qt.QTimer.singleShot(0, self.stop)
+
+    def stop(self, notify=True):
+        """Stop and let the audio go; *onDone()* unless not *notify*."""
+        audio, buffer = self._audio, self._buffer
+        if audio is None:
+            return
+        self._audio = self._buffer = None
+        self._guard.stop()
+        try:
+            audio.stop()
+            buffer.close()
+        except Exception:  # noqa: BLE001 - the device went away meanwhile
+            logging.debug("GTReview: stopping the playback failed", exc_info=True)
+        if notify:
+            self._onDone()
+
+
 # --------------------------------------------------------------------------- #
 # ffmpeg
 # --------------------------------------------------------------------------- #
@@ -791,6 +876,7 @@ class Take:
         self.wav = None
         self.audioOffset = None
         self.audioDevice = ""
+        self.boostDb = 0.0
         self.gaps = []
         self.writer = None
         self.h264 = False
@@ -914,8 +1000,8 @@ def _narrateInto(take, events, source, target, audio, start=None):
 
 def _audioMeta(take, meta):
     meta["audio"] = {
-        "device": take.audioDevice, "offset": float(take.audioOffset or 0.0),
-        "duration": take.wav.seconds, "gaps": take.gaps,
+        "device": take.audioDevice, "boost_db": float(take.boostDb or 0.0),
+        "offset": float(take.audioOffset or 0.0), "duration": take.wav.seconds, "gaps": take.gaps,
     }
     return meta["audio"]
 
@@ -1059,21 +1145,32 @@ class Recorder:
     Callbacks: *onChange()* after any switch and when a take has been saved;
     *onLevel(dBFS or None)*; *onTick(seconds)* twice a second while
     recording; *onWarning(text)*; *onTake(take)* right after a take opens (to
-    log where the case stands, into that take); and *confirmReplace(case_id,
+    log where the case stands, into that take); *confirmReplace(case_id,
     kinds, switching)*, asked before takes would replace recordings a case
     already has -- *switching* when the reader moved on to that case while
-    recording.  Without it, recordings are replaced without asking.
+    recording (without it, recordings are replaced without asking); and
+    *onTestSample(data, rate, channels)*, what a microphone test heard, to be
+    played back and judged -- the recorder keeps none of it.
+
+    :meth:`setBoost` raises everything taken from the microphone by some dB,
+    before it is measured or written: the level, the test, the recordings.
     """
 
     def __init__(self, context, onChange=None, onLevel=None, onTick=None, onWarning=None,
-                 onTake=None, confirmReplace=None):
+                 onTake=None, confirmReplace=None, onTestSample=None):
         self._context = context
         self._onChange = onChange or (lambda: None)
         self._onTick = onTick or (lambda seconds: None)
         self._onWarning = onWarning or (lambda text: None)
         self._onTake = onTake or (lambda take: None)
         self._confirmReplace = confirmReplace or (lambda caseId, kinds, switching: True)
-        self.mic = MicrophoneInput(self._onAudio, onLevel)
+        self._onTestSample = onTestSample or (lambda data, rate, channels: None)
+        self._onLevel = onLevel
+        self.boostDb = 0.0
+        self._gain = 1.0
+        self._carry = b""
+        self._testSample = None
+        self.mic = MicrophoneInput(self._onAudio, self._onMicLevel if onLevel is not None else None)
         self.audioOn = False
         self.videoOn = False
         self.testing = False
@@ -1158,7 +1255,7 @@ class Recorder:
         if self.videoOn:
             raise RuntimeError("the video is recording it already; one recording at a time, "
                                "so stop the video first")
-        self.stopTest()
+        self.stopTest(handOver=False)
         context = self._caseContext()
         if not self._mayReplace(context, [MICROPHONE], switching=False):
             return False
@@ -1191,6 +1288,7 @@ class Recorder:
             return
         self.mic.start(name, realm, label)
         self.microphone = (name, realm, label)
+        self._carry = b""
         self._bytes = 0
         self._clock = recordlog.AudioClock(self.mic.rate, time.monotonic())
         self._silenceWarned = False
@@ -1217,8 +1315,32 @@ class Recorder:
         except OSError:
             logging.exception("GTReview: closing %s failed", take.wav.path)
 
+    def setBoost(self, db):
+        """Raise what the microphone delivers by *db* from now on."""
+        self.boostDb = float(db)
+        self._gain = 10.0 ** (self.boostDb / 20.0)
+
+    def _onMicLevel(self, dbfs):
+        self._onLevel(None if dbfs is None else min(0.0, dbfs + self.boostDb))
+
+    def _amplified(self, data):
+        """*data* raised by the boost, clipped at full scale; a byte left
+        over from a delivery that ended mid-sample goes with the next one."""
+        if self._gain == 1.0:
+            return data
+        data = self._carry + data
+        whole = len(data) - len(data) % 2
+        self._carry = data[whole:]
+        samples = np.frombuffer(data[:whole], dtype="<i2").astype(np.float32) * self._gain
+        return np.clip(np.rint(samples), -32768, 32767).astype("<i2").tobytes()
+
     def _onAudio(self, data):
-        if self.testing or self._micLost is not None:
+        data = self._amplified(data)
+        if self.testing:
+            if self._testSample is not None:
+                self._testSample += data
+            return
+        if self._micLost is not None:
             return
         if self.mic.gone():
             # Checked on every delivery, not only on the clock: what arrives
@@ -1313,22 +1435,32 @@ class Recorder:
 
         qt.QTimer.singleShot(0, stop)
 
-    def startTest(self, name, realm, label="", seconds=10):
-        """Open the microphone for *seconds* to watch its level; nothing is saved."""
+    def startTest(self, name, realm, label="", seconds=MIC_TEST_SECONDS):
+        """Listen to the microphone for *seconds*, boost included, and keep
+        what it hears in memory for :meth:`stopTest` to hand over."""
         if self.mic.active or self.testing:
             return
+        self._carry = b""
+        self._testSample = bytearray()
         self.mic.start(name, realm, label, hold=False)
         self.testing = True
         self._testTimer.start(int(seconds * 1000))
         self._onChange()
 
-    def stopTest(self):
+    def stopTest(self, handOver=True):
+        """End the test.  What it heard goes to *onTestSample* once, to be
+        played back and judged, unless not *handOver* (a recording starts,
+        Slicer closes); it is not kept here either way."""
         if not self.testing:
             return
         self._testTimer.stop()
-        self.mic.stop()
+        self.mic.stop()  # (what it still had comes in while testing)
+        rate, channels = self.mic.rate, self.mic.channels
+        sample, self._testSample = self._testSample, None
         self.testing = False
         self._onChange()
+        if handOver and sample:
+            self._onTestSample(bytes(sample), rate, channels)
 
     # ---------------------------------------------------------------- video
     def startVideo(self, source="", name="", realm="", label="", withSound=True):
@@ -1343,7 +1475,7 @@ class Recorder:
                                "first (the video records the microphone too)")
         if not findFfmpeg()[0]:
             raise RuntimeError("Recording video needs ffmpeg: get it with \"Get ffmpeg...\".")
-        self.stopTest()
+        self.stopTest(handOver=False)
         context = self._caseContext()
         if not self._mayReplace(context, [VIDEO], switching=False):
             return False
@@ -1475,6 +1607,7 @@ class Recorder:
                 if self._clock is not None else 0.0
             take.audioOffset = -pending
             take.audioDevice = self.mic.label
+            take.boostDb = self.boostDb
         if kind == VIDEO:
             take.videoSource = source or ""
         self.takes[kind] = take
@@ -1482,7 +1615,7 @@ class Recorder:
         take.log.add(0.0, "recording_started", media=kind)
         if take.wav is not None:
             take.log.add(0.0, "audio_started", device=self.mic.label, rate=self.mic.rate,
-                         channels=self.mic.channels)
+                         channels=self.mic.channels, boost_db=self.boostDb)
         if kind == VIDEO:
             take.log.add(0.0, "video_started", source=take.videoSource or "all views",
                          sound=take.wav is not None)
@@ -1617,7 +1750,7 @@ class Recorder:
         """Stop everything and save the takes.  Never raises: it runs as a
         scene closes and as Slicer exits."""
         try:
-            self.stopTest()
+            self.stopTest(handOver=False)
         except Exception:  # noqa: BLE001
             logging.exception("GTReview: stopping the microphone test failed")
         self._frameTimer.stop()

@@ -393,3 +393,74 @@ def narrate(mic: np.ndarray, rate: int, placements: Sequence[Tuple[float, np.nda
         out[lo:hi] = np.clip(np.round(stretch), -32768, 32767).astype(np.int16)
         free_from = stop + int(0.15 * rate)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# the microphone test
+# --------------------------------------------------------------------------- #
+#: a voice should come in about here (dBFS of its loud stretches) ...
+VOICE_TARGET_DB = -18.0
+#: ... and below this it is too quiet to stand out against the room
+VOICE_QUIET_DB = -30.0
+#: a loudest moment below this means nothing was heard
+SILENT_PEAK_DB = -60.0
+#: a sample this loud is clipped; more than CLIPPED_SHARE of them is too loud
+CLIP_LEVEL, CLIPPED_SHARE = 32000, 0.001
+#: what a suggested boost leaves between the loudest moment and full scale
+BOOST_HEADROOM_DB = 3.0
+
+
+def _dbfs(value: float) -> float:
+    return 20.0 * float(np.log10(max(float(value), 1.0) / 32768.0))
+
+
+def level_report(samples: np.ndarray, rate: int, boost_steps: Sequence[int] = (6, 12, 18, 24)) -> Dict:
+    """How loud a microphone test came in, and what would help.
+
+    *samples* are int16, ``(frames,)`` or ``(frames, channels)``.  The voice
+    is measured over its loud stretches -- the 90th percentile of 50 ms
+    windows -- so the pauses between words do not count against it.
+
+    Returns ``{"peak_db", "voice_db", "clipped", "verdict", "boost_db"}``:
+    *verdict* is ``"silent"`` (nothing heard), ``"loud"`` (clipped),
+    ``"quiet"`` or ``"good"``; for ``"quiet"``, *boost_db* is the largest of
+    *boost_steps* that brings the voice no higher than VOICE_TARGET_DB and
+    leaves BOOST_HEADROOM_DB above the loudest moment -- 0 when even the
+    smallest would clip it.
+    """
+    x = np.asarray(samples).astype(np.float32)
+    if x.ndim == 2:
+        x = x.mean(axis=1)
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    window = max(1, int(rate * 0.05))
+    stretches = x.size // window
+    if stretches:
+        rms = np.sqrt(np.mean(np.square(x[: stretches * window].reshape(stretches, window)), axis=1))
+        voice = float(np.percentile(rms, 90))
+    else:
+        voice = float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
+    clipped = float(np.mean(np.abs(x) >= CLIP_LEVEL)) if x.size else 0.0
+    report = {"peak_db": round(_dbfs(peak), 1), "voice_db": round(_dbfs(voice), 1),
+              "clipped": round(clipped, 4), "verdict": "good", "boost_db": 0}
+    if report["peak_db"] < SILENT_PEAK_DB:
+        report["verdict"] = "silent"
+    elif clipped > CLIPPED_SHARE:
+        report["verdict"] = "loud"
+    elif report["voice_db"] < VOICE_QUIET_DB:
+        report["verdict"] = "quiet"
+        room = min(VOICE_TARGET_DB - report["voice_db"], -BOOST_HEADROOM_DB - report["peak_db"])
+        report["boost_db"] = max([step for step in boost_steps if step <= room] or [0])
+    return report
+
+
+def convert_pcm(data: bytes, rate: int, channels: int, to_rate: int, to_channels: int) -> bytes:
+    """16-bit PCM *data* as *to_rate* and *to_channels*, for an output that
+    plays nothing else: mixed down, resampled, copied to every channel."""
+    channels = max(1, int(channels))
+    frames = len(data) // (2 * channels)
+    x = np.frombuffer(data[: frames * 2 * channels], dtype="<i2").reshape(frames, channels)
+    mono = x.astype(np.float32).mean(axis=1)
+    if int(to_rate) != int(rate):
+        mono = resample(mono, rate, to_rate)
+    out = np.repeat(mono[:, None], max(1, int(to_channels)), axis=1)
+    return np.clip(np.rint(out), -32768, 32767).astype("<i2").tobytes()

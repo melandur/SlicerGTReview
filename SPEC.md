@@ -86,7 +86,10 @@ case, replaced only after a confirmation prompt.
    AND a seed voxel inside the lesion (numbers are ranks and change on
    recount); the recordings speak each lesion switch, starting with the lesion
    selected (lesion 1 is selected when none is), and the video carries a
-   banner naming the case and the lesion.
+   banner naming the case and the lesion.  *Test* plays back a few seconds
+   of the microphone, held in memory only, says whether the voice came in
+   loud enough, and offers a boost (applied to everything recorded) when
+   not.
    Capture stays in Slicer's process; encoding and the finished files are made
    off the main thread.  See README, *Recording*.
 
