@@ -641,25 +641,40 @@ class RecordingIntegrationTest(unittest.TestCase):
         widget = self.widget
         self.fake()
         self.asked[:] = []
+        # the clicks are timed, not assumed: a slow machine can stall for
+        # seconds between two of them
         widget.recordAudioButton.click()
+        audioOn = time.monotonic()
         widget.recordVideoButton.click()
+        videoOn = time.monotonic()
         pump(1.5)
+        audioOff = time.monotonic()
         widget.recordAudioButton.click()
         pump(0.3)
         CHECKS.check(widget.recorder.capturing and widget.recorder.videoOn,
                      "the microphone stays open for the video")
+        CHECKS.check(list(widget.recorder.takes) == [VIDEO], "but its own take is closed",
+                     str(list(widget.recorder.takes)))
         pump(2.2)
         widget.recordVideoButton.click()
         CHECKS.check(waitForFiles(widget), "saved")
         CHECKS.check(self.asked == [(CASE_TWO, (MICROPHONE,), False), (CASE_TWO, (VIDEO,), False)],
                      "each switch asked before replacing what the case had", str(self.asked))
         microphone = self.seconds(MICROPHONE, CASE_TWO)
-        CHECKS.check(1.2 < microphone < 2.4, "the microphone recording ends where its switch went off",
-                     "{:.2f} s".format(microphone))
+        CHECKS.check(abs(microphone - (audioOff - audioOn)) < 0.4,
+                     "the microphone recording ends where its switch went off",
+                     "{:.2f} s, the switch on for {:.2f} s".format(microphone, audioOff - audioOn))
         videoLog = self.log(VIDEO, CASE_TWO)
+        meta = videoLog["video"]
         container = self.seconds(VIDEO, CASE_TWO)
-        CHECKS.check(abs(container - videoLog["video"]["duration"]) < 0.4 and container > 3.4,
-                     "the MP4 runs as long as the video", "{:.2f} s".format(container))
+        CHECKS.check(abs(container - meta["duration"]) < 0.4
+                     and abs(meta["duration"] - (videoLog["duration"] - meta["offset"])) < 0.5
+                     and videoLog["duration"] > (audioOff - videoOn) + 2.0,
+                     "the MP4 runs as long as the video, which ran on after the microphone",
+                     "{:.2f} s of MP4, {:.2f} s of frames from {:.2f} s into a {:.2f} s take; "
+                     "the microphone went off {:.2f} s in".format(
+                         container, meta["duration"], meta["offset"], videoLog["duration"],
+                         audioOff - videoOn))
         soundRate, sound = soundOf(self.exported(VIDEO, CASE_TWO), os.path.join(self.root, "sound5.wav"))
         tail = sound[-int(1.0 * soundRate):]
         CHECKS.check(abs(sound.shape[0] / float(soundRate) - container) < 0.4
