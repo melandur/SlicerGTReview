@@ -240,14 +240,8 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$RUNNER_TEMP/Slicer.app/Contents/Info.plist"
           codesign --verify --verbose=2 "$RUNNER_TEMP/Slicer.app" || echo "(the app's seal does not verify)"
 
-      - name: The enabled Slicer, started as the Dock starts it, before anyone allowed it (macOS)
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        timeout-minutes: 6
-        env:
-          PROBE_REPORT: ${{ runner.temp }}/probe-enabled-open.json
-        run: bash "$RUNNER_TEMP/probe.sh" open
-
+      # before the enabled Slicer ever asks: a prompt nobody can answer here
+      # would hold every request after it
       - name: Allow the microphone, as a click on "Allow" would (macOS)
         if: runner.os == 'macOS'
         continue-on-error: true

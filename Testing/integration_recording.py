@@ -393,12 +393,12 @@ class RecordingIntegrationTest(unittest.TestCase):
                     out.append("{}/{}".format(kind, name))
         return out
 
-    def selectLesion(self, number):
+    def selectLesion(self, number, settle=0.05):
         table = self.widget.lesionTable
         for row in range(table.rowCount):
             if table.item(row, 0).data(qt.Qt.UserRole) == number:
                 table.selectRow(row)
-                pump(0.05)
+                pump(settle)
                 return
         raise AssertionError("no lesion #{} in the table".format(number))
 
@@ -453,8 +453,7 @@ class RecordingIntegrationTest(unittest.TestCase):
         self.selectLesion(1)                      # A
         pump(1.5)
         for number in (2, 3, 2):                  # a burst: only the last is announced
-            self.selectLesion(number)
-            pump(0.1)
+            self.selectLesion(number, settle=0.0)  # (no redraws between: slow machines)
         pump(1.5)
         table = widget.lesionTable
         row = [r for r in range(table.rowCount) if table.item(r, 0).data(qt.Qt.UserRole) == 2][0]
