@@ -16,7 +16,8 @@
 #     bash GTReviewMacMicrophone.sh /Applications/Slicer.app
 #
 # Run it again after installing a new Slicer.  Installing Slicer again undoes
-# it.  An app the current user cannot write needs sudo in front.
+# it.  An app the current user cannot write needs sudo in front; a Terminal
+# macOS does not let change apps is told where to switch that on.
 set -euo pipefail
 
 APP="${1:-}"
@@ -40,6 +41,22 @@ if [[ ! -w "$PLIST" ]]; then
     echo "error: $APP cannot be changed by $(whoami); run this again with sudo in front" >&2
     exit 1
 fi
+# macOS 13 and later let a program change an app someone else signed only
+# when it is allowed to ("App Management"), sudo or not.  Writing into the
+# app is what tells, before anything is changed, and what makes macOS list
+# this Terminal under that switch.
+PROBE="$APP/.gtreview-write-test"
+if ! failure="$(touch "$PROBE" 2>&1)"; then
+    if [[ "$failure" == *"Operation not permitted"* ]]; then
+        echo "error: macOS does not let this Terminal change apps.  Switch it on under" >&2
+        echo "       System Settings > Privacy & Security > App Management" >&2
+        echo "       (macOS may ask to quit and reopen Terminal), then run this again." >&2
+    else
+        echo "error: $APP cannot be changed by $(whoami) ($failure); run this again with sudo in front" >&2
+    fi
+    exit 1
+fi
+rm -f "$PROBE"
 
 WHY="GTReview records your voice during a review, so that whoever listens later knows which lesion you meant."
 WORK="$(mktemp -d)"

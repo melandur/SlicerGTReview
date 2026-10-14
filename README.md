@@ -574,8 +574,10 @@ event log is written whatever else fails.
 
   The script adds the microphone permission to that copy of Slicer and signs
   it again on this Mac; macOS then asks once, the first time GTReview opens
-  the microphone. Run it again after installing a new Slicer; installing
-  Slicer again undoes it. A Slicer started from Terminal is judged by
+  the microphone. macOS 13 and later may first keep Terminal from changing
+  apps; the script then changes nothing and says where to allow it
+  (*System Settings › Privacy & Security › App Management*). Run it again
+  after installing a new Slicer; installing Slicer again undoes it. A Slicer started from Terminal is judged by
   Terminal's permission instead, so GTReview lets it try the microphone.
 - **Windows.** Desktop apps must be allowed the microphone, under *Settings ›
   Privacy & security › Microphone › Let desktop apps access your microphone*.

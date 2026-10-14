@@ -5754,8 +5754,10 @@ class GTReviewWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "again; macOS asks once whether Slicer may use the microphone:<br><br>"
             "<code>{}</code><br><br>"
             "The script adds the microphone permission to this copy of Slicer and signs it again "
-            "on this Mac. Run it again after installing a new Slicer; installing Slicer again "
-            "undoes it.".format(command.replace("&", "&amp;").replace("<", "&lt;")))
+            "on this Mac. Should macOS say that Terminal was prevented from modifying apps, "
+            "switch Terminal on under System Settings &gt; Privacy &amp; Security &gt; App "
+            "Management and run the command again. Run it again after installing a new Slicer; "
+            "installing Slicer again undoes it.".format(command.replace("&", "&amp;").replace("<", "&lt;")))
         box.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         copy = box.addButton("Copy command", qt.QMessageBox.ActionRole)
         box.addButton(qt.QMessageBox.Close)
